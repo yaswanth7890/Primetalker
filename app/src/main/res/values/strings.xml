@@ -1,0 +1,30 @@
+<resources>
+    <string name="app_name">My Application</string>
+    <string name="select_your_language">Select your language</string>
+    <string name="select_other_language">Select other person language</string>
+
+    <string-array name="country_codes">
+        <item>+1 (USA)</item>
+        <item>+44 (UK)</item>
+        <item>+91 (India)</item>
+        <item>+81 (Japan)</item>
+        <item>+61 (Australia)</item>
+        <item>+49 (Germany)</item>
+        <item>+33 (France)</item>
+        <item>+86 (China)</item>
+    </string-array>
+
+    <string-array name="languages">
+        <item>English</item>
+        <item>Hindi</item>
+        <item>Telugu</item>
+        <item>Tamil</item>
+        <item>Malayalam</item>
+        <item>spanish</item>
+        <item>french</item>
+        <item>German</item>
+
+    </string-array>
+
+
+</resources>

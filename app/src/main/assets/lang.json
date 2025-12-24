@@ -1,0 +1,42 @@
+{
+  "en": {
+    "settings": "Settings",
+    "name": "Name",
+    "phone": "Phone",
+    "preferred_language": "Preferred Language",
+    "notifications": "Notifications",
+    "dark_mode": "Dark Mode",
+    "logout": "Logout",
+    "credits": "Credits",
+    "current_balance": "Current Balance",
+    "account_details": "Account Details",
+    "preferences": "Preferences"
+  },
+  "hi": {
+    "settings": "सेटिंग्स",
+    "name": "नाम",
+    "phone": "फ़ोन",
+    "preferred_language": "पसंदीदा भाषा",
+    "notifications": "सूचनाएं",
+    "dark_mode": "डार्क मोड",
+    "logout": "लॉग आउट",
+    "credits": "श्रेय",
+    "current_balance": "वर्तमान शेष",
+    "account_details": "खाता विवरण",
+    "preferences": "वरीयताएँ"
+  },
+  "te": {
+    "settings": "సెట్టింగ్స్",
+    "name": "పేరు",
+    "phone": "ఫోన్",
+    "preferred_language": "ఇష్టమైన భాష",
+    "notifications": "నోటిఫికేషన్స్",
+    "dark_mode": "డార్క్ మోడ్",
+    "logout": "లాగ్ అవుట్",
+    "credits": "క్రెడిట్స్",
+    "current_balance": "ప్రస్తుత బ్యాలెన్స్",
+    "account_details": "ఖాతా వివరాలు",
+    "preferences": "ప్రాధాన్యతలు"
+  }
+}
+

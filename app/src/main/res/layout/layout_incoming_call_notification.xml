@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@color/black"
+    android:orientation="vertical"
+    android:padding="12dp">
+
+    <!-- Caller Info Row -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingVertical="6dp">
+
+        <ImageView
+            android:id="@+id/imgCaller"
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:src="@drawable/ic_user_avatar"
+            android:scaleType="centerCrop"
+            android:background="@drawable/circle_background"
+            android:contentDescription="Caller Image"
+            android:padding="4dp" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:paddingStart="12dp">
+
+            <TextView
+                android:id="@+id/txtCallerName"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="John Doe"
+                android:textColor="@android:color/white"
+                android:textStyle="bold"
+                android:textSize="18sp" />
+
+            <TextView
+                android:id="@+id/txtCallType"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Incoming voice call"
+                android:textColor="#CCCCCC"
+                android:textSize="14sp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- Buttons Row -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center"
+        android:paddingTop="8dp"
+        android:paddingBottom="4dp">
+
+        <!-- Reject -->
+        <ImageButton
+            android:id="@+id/btnReject"
+            android:layout_width="64dp"
+            android:layout_height="64dp"
+            android:layout_marginEnd="48dp"
+            android:background="@drawable/round_button_red"
+            android:contentDescription="Reject"
+            android:padding="12dp"
+            android:src="@drawable/ic_call_end" />
+
+        <!-- Answer -->
+        <ImageButton
+            android:id="@+id/btnAnswer"
+            android:layout_width="64dp"
+            android:layout_height="64dp"
+            android:background="@drawable/round_button_green"
+            android:contentDescription="Answer"
+            android:padding="12dp"
+            android:src="@drawable/ic_call_answer" />
+    </LinearLayout>
+
+</LinearLayout>

@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#0d1f22"
+    android:padding="24dp">
+
+    <LinearLayout
+        android:id="@+id/loginForm"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:gravity="center_horizontal"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <!-- App Title -->
+        <TextView
+            android:id="@+id/tvTitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="PrimeTalker"
+            android:textSize="28sp"
+            android:textColor="#FF9800"
+            android:textStyle="bold"
+            android:gravity="center"
+            android:layout_marginBottom="60dp"/>
+
+        <!-- Phone Input -->
+        <com.google.android.material.textfield.TextInputLayout
+            android:id="@+id/tilPhone"
+            style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+            android:layout_width="300dp"
+            android:layout_height="wrap_content"
+            android:hint="Phone Number"
+            app:boxBackgroundColor="#1E1E1E"
+            app:hintTextColor="@color/white">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/etPhone"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="phone"
+                android:backgroundTint="#fdf0d5"
+                android:textColor="@android:color/black"
+                android:textSize="16sp"
+                android:padding="12dp"/>
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <!-- Send OTP -->
+        <Button
+            android:id="@+id/btnSendOTP"
+            android:layout_width="300dp"
+            android:layout_height="wrap_content"
+            android:text="Send OTP"
+            android:textColor="@android:color/white"
+            android:backgroundTint="#4CAF50"
+            android:textStyle="bold"
+            android:layout_marginTop="16dp"/>
+
+        <!-- OTP Input -->
+        <com.google.android.material.textfield.TextInputLayout
+            android:id="@+id/tilOTP"
+            style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+            android:layout_width="300dp"
+            android:layout_height="wrap_content"
+            android:hint="Enter OTP"
+            app:boxBackgroundColor="#1E1E1E"
+            app:hintTextColor="@color/white"
+            android:visibility="gone"
+            android:layout_marginTop="16dp">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/etOTP"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="number"
+                android:textColor="@android:color/white"
+                android:textSize="16sp"
+                android:padding="12dp"/>
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <!-- Timer -->
+        <TextView
+            android:id="@+id/tvTimer"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#FF9800"
+            android:textSize="14sp"
+            android:text="00:30"
+            android:visibility="gone"
+            android:layout_marginTop="8dp"/>
+
+        <!-- Verify OTP -->
+        <Button
+            android:id="@+id/btnVerifyOTP"
+            android:layout_width="300dp"
+            android:layout_height="wrap_content"
+            android:text="Verify OTP"
+            android:textColor="@android:color/white"
+            android:backgroundTint="#4CAF50"
+            android:textStyle="bold"
+            android:visibility="gone"
+            android:layout_marginTop="16dp"/>
+    </LinearLayout>
+
+</androidx.constraintlayout.widget.ConstraintLayout>
