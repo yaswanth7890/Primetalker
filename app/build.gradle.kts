@@ -1,8 +1,14 @@
+
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("com.google.gms.google-services")
+    id("org.jetbrains.kotlin.kapt")
+
+
 }
+
 
 android {
     namespace = "com.example.myapplication"
@@ -51,6 +57,7 @@ dependencies {
     implementation("com.twilio:voice-android:6.7.0")
     implementation("com.twilio:video-android:7.9.1")
     implementation("com.getkeepsafe.relinker:relinker:1.4.5")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // ---- Firebase via BoM (use KTX) ----
     implementation(platform("com.google.firebase:firebase-bom:33.3.0"))
@@ -80,7 +87,12 @@ dependencies {
     // implementation("org.jitsi.react:jitsi-meet-sdk:8.1.2")
 
 
+    implementation ("androidx.room:room-runtime:2.6.1")
+    kapt("androidx.room:room-compiler:2.6.1")
+    implementation ("androidx.room:room-ktx:2.6.1")
+
+
+
 }
 
-// Apply Google Services plugin
-apply(plugin = "com.google.gms.google-services")
+

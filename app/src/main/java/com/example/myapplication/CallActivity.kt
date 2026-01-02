@@ -26,6 +26,8 @@ import okhttp3.Response
 import org.json.JSONObject
 import java.io.IOException
 import android.util.Log
+import android.view.MotionEvent
+
 
 
 class CallActivity : AppCompatActivity() {
@@ -91,6 +93,60 @@ class CallActivity : AppCompatActivity() {
         dialerPanel = findViewById(R.id.dialerPanel)
         fabDialer = findViewById(R.id.fabDialer)
 
+
+        val handle = findViewById<View>(R.id.dragHandle)
+
+        handle.setOnTouchListener(object : View.OnTouchListener {
+            private var startY = 0f
+
+            override fun onTouch(v: View?, event: MotionEvent): Boolean {
+                when (event.action) {
+
+                    MotionEvent.ACTION_DOWN -> {
+                        startY = event.rawY
+                        return true
+                    }
+
+                    MotionEvent.ACTION_MOVE -> {
+                        dialerPanel.alpha = 0.95f
+
+                        val delta = event.rawY - startY
+                        if (delta > 0) {
+                            dialerPanel.translationY = delta
+                        }
+                        return true
+                    }
+
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        val delta = event.rawY - startY
+
+                        if (delta > dialerPanel.height / 4) {
+                            // CLOSE
+                            dialerPanel.animate()
+                                .translationY(dialerPanel.height.toFloat())
+                                .setDuration(200)
+                                .withEndAction {
+                                    dialerPanel.visibility = View.GONE
+                                    dialerPanel.translationY = 0f
+                                    fabDialer.setImageResource(android.R.drawable.ic_menu_call)
+                                }
+                                .start()
+                        } else {
+                            // SNAP BACK
+                            dialerPanel.animate()
+                                .translationY(0f)
+                                .setDuration(150)
+                                .start()
+                        }
+                        return true
+                    }
+                }
+                return false
+            }
+        })
+
+
+
         val countryAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, countryCodes)
         countryAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         spinnerCountryCode.adapter = countryAdapter
@@ -127,7 +183,7 @@ class CallActivity : AppCompatActivity() {
         dockSettings = findViewById(R.id.dock_settings_layout)
         highlightCurrentPage(dockCalls)
 
-        dockChats.setOnClickListener { startActivity(Intent(this, CallActivity::class.java)) }
+        dockChats.setOnClickListener { startActivity(Intent(this, ChatActivity::class.java)) }
         dockSettings.setOnClickListener { startActivity(Intent(this, SettingsActivity::class.java)) }
         dockTranslate.setOnClickListener { startActivity(Intent(this, MainActivity::class.java)) }
 
@@ -170,6 +226,17 @@ class CallActivity : AppCompatActivity() {
             }
         }
     }
+
+    private fun toggleDialer() {
+        if (dialerPanel.visibility == View.VISIBLE) {
+            dialerPanel.visibility = View.GONE
+            fabDialer.setImageResource(android.R.drawable.ic_menu_call)
+        } else {
+            dialerPanel.visibility = View.VISIBLE
+            fabDialer.setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
+        }
+    }
+
 
     private fun getFullPhoneNumber(): String {
         val number = edtPhoneNumber.text.toString().trim()

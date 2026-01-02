@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.example.myapplication.db.DbProvider
 import com.google.firebase.messaging.FirebaseMessaging
 import com.twilio.voice.LogLevel
 import com.twilio.voice.RegistrationException
@@ -33,6 +34,8 @@ class VoiceApp : Application() {
         super.onCreate()
 
         Voice.setLogLevel(LogLevel.ALL)
+
+        DbProvider.init(this)
 
         val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
         var identity = prefs.getString("identity", null)

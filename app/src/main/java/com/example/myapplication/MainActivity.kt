@@ -180,7 +180,7 @@ class MainActivity : AppCompatActivity() {
         highlightCurrentPage(dockTranslate)
 
         dockChats.setOnClickListener {
-            startActivity(Intent(this, CallActivity::class.java))
+            startActivity(Intent(this, ChatListActivity::class.java))
         }
         dockCalls.setOnClickListener {
             startActivity(Intent(this, CallActivity::class.java))

@@ -38,10 +38,15 @@ import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import android.content.Context.RECEIVER_NOT_EXPORTED
 import android.content.Context.RECEIVER_EXPORTED
+import android.media.AudioFocusRequest
 import android.util.Base64
 import java.io.File
 import android.media.MediaPlayer
+import android.os.Build
 
+
+private lateinit var audioManager: AudioManager
+private var focusRequest: AudioFocusRequest? = null
 
 
 
@@ -232,6 +237,9 @@ class CallScreenActivity : AppCompatActivity() {
         isActive = true
         setContentView(R.layout.activity_call_screen)
 
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+
         bindViews()
         setupSpinners()
 
@@ -297,6 +305,37 @@ class CallScreenActivity : AppCompatActivity() {
             setupForAppVideo()
         }
     }
+
+    private fun pauseOriginalCallAudio() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+                .setAudioAttributes(
+                    android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .build()
+
+            audioManager.requestAudioFocus(focusRequest!!)
+        } else {
+            audioManager.requestAudioFocus(
+                null,
+                AudioManager.STREAM_VOICE_CALL,
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
+            )
+        }
+    }
+
+    private fun resumeOriginalCallAudio() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            focusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+        } else {
+            audioManager.abandonAudioFocus(null)
+        }
+    }
+
+
 
     private fun bindViews() {
         txtCallerName = findViewById(R.id.txtCallerName)
@@ -826,6 +865,7 @@ class CallScreenActivity : AppCompatActivity() {
     private fun playNextAudio() {
         if (audioQueue.isEmpty()) {
             isPlayingAudio = false
+            try { voiceCall?.mute(false) } catch (_: Exception) {}
             return
         }
 
@@ -835,35 +875,32 @@ class CallScreenActivity : AppCompatActivity() {
         Thread {
             try {
                 val bytes = Base64.decode(b64, Base64.DEFAULT)
-                val file = File("${externalCacheDir?.absolutePath}/translated.mp3")
+                val file = File("${cacheDir.absolutePath}/translated.mp3")
                 file.writeBytes(bytes)
 
-                val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                val wasSpeaker = am.isSpeakerphoneOn
+                // 🔴 THIS IS THE KEY LINE
+                try { voiceCall?.mute(true) } catch (_: Exception) {}
 
-                val call = CallHolder.activeCall
-                call?.mute(true)
-
-                val player = MediaPlayer()
-                player.setAudioAttributes(
-                    android.media.AudioAttributes.Builder()
-                        .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                player.setDataSource(file.absolutePath)
+                val player = MediaPlayer().apply {
+                    setAudioAttributes(
+                        android.media.AudioAttributes.Builder()
+                            .setUsage(android.media.AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    setDataSource(file.absolutePath)
+                    prepare()
+                    start()
+                }
 
                 player.setOnCompletionListener {
-                    try { call?.mute(false) } catch (_:Exception){}
-                    am.isSpeakerphoneOn = wasSpeaker
                     it.release()
+                    try { voiceCall?.mute(false) } catch (_: Exception) {}
                     playNextAudio()
                 }
 
-                player.prepare()  // NOT async → runs safely because in background thread
-
             } catch (e: Exception) {
-                Log.e("TranslatePlay", "Playback error: ${e.message}")
+                try { voiceCall?.mute(false) } catch (_: Exception) {}
                 playNextAudio()
             }
         }.start()

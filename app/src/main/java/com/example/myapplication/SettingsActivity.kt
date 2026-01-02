@@ -77,7 +77,7 @@ class SettingsActivity : AppCompatActivity() {
 
         // Bottom dock
         highlightCurrentPage(dockSettings)
-        dockChats.setOnClickListener { startActivity(Intent(this, CallActivity::class.java)) }
+        dockChats.setOnClickListener { startActivity(Intent(this, ChatActivity::class.java)) }
         dockCalls.setOnClickListener { startActivity(Intent(this, CallActivity::class.java)) }
         dockTranslate.setOnClickListener { startActivity(Intent(this, MainActivity::class.java)) }
 

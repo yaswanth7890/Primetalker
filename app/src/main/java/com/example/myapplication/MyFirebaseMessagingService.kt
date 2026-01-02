@@ -141,6 +141,33 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
                 sendBroadcast(i)
             }
 
+            "CHAT_MESSAGE" -> {
+
+                val prefs = getSharedPreferences("chat_store", MODE_PRIVATE)
+                val list = prefs.getStringSet("messages", mutableSetOf())!!.toMutableSet()
+
+                val entry = JSONObject().apply {
+                    put("from", data["sender"])
+                    put("original", data["original"])
+                    put("ts", System.currentTimeMillis())
+                }.toString()
+
+
+                list.add(entry)
+                prefs.edit().putStringSet("messages", list).apply()
+
+                // 🔔 still broadcast (for live case)
+                val i = Intent(ChatActivity.ACTION_CHAT_MESSAGE).apply {
+                    putExtra("from", data["sender"])
+                    putExtra("original", data["original"])
+                    `package` = packageName
+                }
+                sendBroadcast(i)
+
+            }
+
+
+
 
 
             else -> {

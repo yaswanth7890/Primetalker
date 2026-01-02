@@ -54,22 +54,25 @@
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="12dp"
-        android:background="@android:color/white"
-        android:elevation="8dp"
+        android:background="@drawable/bg_bottom_sheet"
+        android:elevation="12dp"
+        android:paddingTop="8dp"
         android:visibility="gone"
         app:layout_constraintBottom_toTopOf="@id/bottomDock"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
-        <!-- Scroll toggle -->
-        <TextView
-            android:id="@+id/tvScrollToggle"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="-"
-            android:textSize="24sp"
-            android:layout_gravity="center"/>
+
+
+    <!-- Scroll toggle -->
+        <View
+            android:id="@+id/dragHandle"
+            android:layout_width="40dp"
+            android:layout_height="4dp"
+            android:layout_gravity="center"
+            android:layout_marginBottom="12dp"
+            android:background="@drawable/drag_handle"/>
+
 
         <!-- Phone number input -->
         <LinearLayout
@@ -127,6 +130,8 @@
             android:alignmentMode="alignMargins"
             android:useDefaultMargins="true">
 
+
+
             <Button android:text="1" style="@style/DialerButton"/>
             <Button android:text="2" style="@style/DialerButton"/>
             <Button android:text="3" style="@style/DialerButton"/>
@@ -171,6 +176,8 @@
 
     </LinearLayout>
 
+
+
     <!-- Floating Dialer Button -->
     <com.google.android.material.floatingactionbutton.FloatingActionButton
         android:id="@+id/fabDialer"
@@ -178,9 +185,11 @@
         android:layout_height="wrap_content"
         android:src="@android:drawable/ic_menu_call"
         android:contentDescription="Dialer"
+        android:layout_margin="16dp"
         app:layout_constraintBottom_toTopOf="@id/bottomDock"
-        app:layout_constraintEnd_toEndOf="parent"
-        android:layout_margin="16dp"/>
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"/>
+
 
     <!-- Bottom Dock -->
     <include
