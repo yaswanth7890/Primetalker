@@ -9,24 +9,37 @@
 
 
 
-    <TextView
-        android:id="@+id/tvPeer"
+    <RelativeLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:textSize="16sp"
-        android:textStyle="bold"
-        android:textColor="#212121" />
+        android:padding="12dp">
 
-    <TextView
-        android:id="@+id/tvLastMessage"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:textSize="14sp"
-        android:textColor="#757575"
-        android:paddingTop="4dp"
-        android:maxLines="1"
-        android:ellipsize="end" />
+        <TextView
+            android:id="@+id/tvPeer"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textSize="16sp"
+            android:textStyle="bold" />
 
+        <TextView
+            android:id="@+id/tvLastMessage"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_below="@id/tvPeer"
+            android:textSize="14sp"
+            android:textColor="#666" />
+
+        <!-- 🔥 UNREAD BADGE -->
+        <TextView
+            android:id="@+id/tvUnread"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:layout_alignParentEnd="true"
+            android:gravity="center"
+            android:textColor="@android:color/white"
+            android:background="@drawable/bg_unread_badge"
+            android:visibility="gone"/>
+    </RelativeLayout>
     <!-- Divider -->
     <View
         android:layout_width="match_parent"

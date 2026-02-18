@@ -19,23 +19,24 @@ interface ChatDao {
 
     // Load chat list (WhatsApp home screen)
     @Query("""
-    SELECT 
-        peerIdentity,
-        MAX(timestamp) AS lastTime,
-        (
-            SELECT originalText 
-            FROM chats c2 
-            WHERE c2.peerIdentity = chats.peerIdentity
-              AND c2.myIdentity = :me
-            ORDER BY timestamp DESC
-            LIMIT 1
-        ) AS lastMessage
-    FROM chats
-    WHERE myIdentity = :me
-    GROUP BY peerIdentity
-    ORDER BY lastTime DESC
+SELECT 
+    peerIdentity,
+    COUNT(CASE WHEN isRead = false THEN 1 END) AS unreadCount,
+    MAX(timestamp) AS lastTime,
+    (
+        SELECT originalText FROM chats c2
+        WHERE c2.peerIdentity = chats.peerIdentity
+          AND c2.myIdentity = :me
+        ORDER BY timestamp DESC
+        LIMIT 1
+    ) AS lastMessage
+FROM chats
+WHERE myIdentity = :me
+GROUP BY peerIdentity
+ORDER BY lastTime DESC
 """)
     suspend fun getChatList(me: String): List<ChatListItem>
+
 
 
 
@@ -48,6 +49,16 @@ interface ChatDao {
     WHERE myIdentity = :me AND peerIdentity = :peer
 """)
     suspend fun deleteChat(me: String, peer: String)
+
+
+
+    @Query("""
+UPDATE chats 
+SET isRead = true 
+WHERE myIdentity = :me 
+AND peerIdentity = :peer
+""")
+    suspend fun markChatRead(me: String, peer: String)
 
 
 

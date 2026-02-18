@@ -29,6 +29,7 @@
             android:background="@android:color/transparent"
             android:src="@android:drawable/ic_input_add"
             app:tint="@android:color/white" />
+
     </RelativeLayout>
 
 
@@ -38,9 +39,20 @@
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/chatListRecycler"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"/>
+        android:layout_height="0dp"
+        android:layout_weight="1"/>
 
 
 
+    <!-- Bottom Dock -->
+    <include
+        layout="@layout/dock"
+        android:layout_width="match_parent"
+        android:layout_height="60dp"/>
 
 </LinearLayout>
+
+
+
+
+

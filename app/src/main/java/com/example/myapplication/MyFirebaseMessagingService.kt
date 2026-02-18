@@ -10,9 +10,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Color
+import android.media.AudioTrack
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import android.util.Base64
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import com.twilio.voice.CallException
@@ -25,9 +27,28 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.IOException
+import android.media.AudioFormat
+import android.media.AudioManager
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
+import com.example.myapplication.db.DbProvider
+import com.example.myapplication.db.ChatEntity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+
+import kotlinx.coroutines.launch
+
 
 
 class MyFirebaseMessagingService : FirebaseMessagingService() {
+
+    override fun onCreate() {
+        super.onCreate()
+
+        // 🔥 REQUIRED for Room usage inside FCM
+        DbProvider.init(applicationContext)
+    }
+
 
     private val CHANNEL_ID = "incoming_call_channel"
     private val BASE_URL = "https://nodical-earlie-unyieldingly.ngrok-free.dev" // 🔧 change if using ngrok or deployed server
@@ -85,9 +106,8 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
                     // Save invite for later accept/reject
                     IncomingCallHolder.invite = callInvite
 
-                    // Show our unified incoming UI/notification (VOICE)
-                    val from = callInvite.from ?: deriveDisplayNameFromPayload(data, "Unknown")
-                    showIncomingActivity(kind = "VOICE", from = from, room = null)
+                    // ❌ DO NOT open UI here
+                    Log.d("Twilio", "CallInvite received, waiting for FCM UI trigger")
                 }
 
                 override fun onCancelledCallInvite(cancelledCallInvite: CancelledCallInvite, callException: CallException?) {
@@ -128,33 +148,35 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
                 sendBroadcast(intent)
             }
 
-            "TRANSLATION" -> {
-                val text = data["translated_text"] ?: ""
-                val audio64 = data["translated_audio_base64"] ?: ""
 
-                // Broadcast to CallScreenActivity
-                val i = Intent("ACTION_TRANSLATION_INCOMING").apply {
-                    putExtra("translated_text", text)
-                    putExtra("translated_audio_base64", audio64)
-                    `package` = packageName
-                }
-                sendBroadcast(i)
-            }
 
             "CHAT_MESSAGE" -> {
 
-                val prefs = getSharedPreferences("chat_store", MODE_PRIVATE)
-                val list = prefs.getStringSet("messages", mutableSetOf())!!.toMutableSet()
+                val prefs = getSharedPreferences("app_prefs", MODE_PRIVATE)
+                val myIdentity = prefs.getString("identity", "")!!
+                    .replace("\\D".toRegex(), "")
 
-                val entry = JSONObject().apply {
-                    put("from", data["sender"])
-                    put("original", data["original"])
-                    put("ts", System.currentTimeMillis())
-                }.toString()
+                val peer = data["sender"]!!.replace("\\D".toRegex(), "")
+                val text = data["original"]!!
+                val isChatOpenForThisPeer = AppVisibility.currentChatPeer == peer
+                CoroutineScope(Dispatchers.IO).launch {
+                    DbProvider.db.chatDao().insert(
+                        ChatEntity(
+                            myIdentity = myIdentity,
+                            peerIdentity = peer,
+                            fromIdentity = peer,
+                            originalText = text,
+                            isRead = isChatOpenForThisPeer
+                        )
+                    )
+                    val refresh = Intent(ChatActions.ACTION_REFRESH_CHATLIST).apply {
+                        `package` = packageName
+                    }
+                    sendBroadcast(refresh)
+
+                }
 
 
-                list.add(entry)
-                prefs.edit().putStringSet("messages", list).apply()
 
                 // 🔔 still broadcast (for live case)
                 val i = Intent(ChatActivity.ACTION_CHAT_MESSAGE).apply {
@@ -165,9 +187,6 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
                 sendBroadcast(i)
 
             }
-
-
-
 
 
             else -> {

@@ -78,7 +78,13 @@ class IncomingCallActivity : AppCompatActivity() {
         val room = intent.getStringExtra("room")
 
         // ✅ Clean up caller label (remove "client:" prefixes)
-        txtCallerNumber.text = "+${from.removePrefix("client:").removePrefix("+")}"
+        val realCaller =
+            intent.getStringExtra("from")
+                ?: CallHolder.callerDisplayName
+                ?: "Unknown"
+
+        txtCallerNumber.text = realCaller
+
         txtCallType.text = if (type == "VIDEO") "Video Call" else "Audio Call"
 
         Log.d("TwilioDebug", "📨 IncomingCallActivity: type=$type from=$from room=$room")
@@ -138,6 +144,11 @@ class IncomingCallActivity : AppCompatActivity() {
             stopService(stop)
         } catch (_: Exception) {}
 
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(Intent(this, CallForegroundService::class.java))
+        } else {
+            startService(Intent(this, CallForegroundService::class.java))
+        }
 
         // ✅ Accept immediately using Twilio’s built-in bridge token
         invite.accept(this@IncomingCallActivity, object : Call.Listener {

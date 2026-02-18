@@ -6,16 +6,17 @@ import android.os.Bundle
 import android.view.Gravity
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
-import com.google.mlkit.nl.languageid.LanguageIdentification
-import com.google.mlkit.nl.translate.*
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.IntentFilter
 import android.graphics.Color
 import android.os.Build
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.view.View
 import androidx.annotation.RequiresApi
 import androidx.appcompat.app.AlertDialog
+import java.util.Locale
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -25,6 +26,7 @@ import androidx.lifecycle.lifecycleScope
 import com.example.myapplication.db.ChatEntity
 import kotlinx.coroutines.launch
 import com.example.myapplication.db.DbProvider
+import com.google.mlkit.nl.languageid.LanguageIdentification
 
 
 
@@ -44,6 +46,15 @@ class ChatActivity : AppCompatActivity() {
 
     private lateinit var chatScroll: ScrollView
 
+
+    private lateinit var tvMicLang: TextView
+
+
+
+
+    private lateinit var speechRecognizer: android.speech.SpeechRecognizer
+    private lateinit var speechIntent: Intent
+    private var isListening = false
 
 
     // Receiver
@@ -77,14 +88,52 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var dockCalls: LinearLayout
     private lateinit var dockSettings: LinearLayout
 
-    private val languages = listOf(
-        "English" to TranslateLanguage.ENGLISH,
-        "Hindi" to TranslateLanguage.HINDI,
-        "Telugu" to TranslateLanguage.TELUGU,
-        "French" to TranslateLanguage.FRENCH,
-        "Spanish" to TranslateLanguage.SPANISH
+    data class LanguageConfig(
+        val label: String,          // Spinner label
+        val translateCode: String,  // ML Kit Translate code
+        val sttLocale: String       // Android STT locale
     )
 
+    private val languages = listOf(
+        LanguageConfig("English", "en", "en-IN"),
+        LanguageConfig("Hindi", "hi", "hi-IN"),
+        LanguageConfig("Telugu", "te", "te-IN"),
+        LanguageConfig("Tamil", "ta", "ta-IN"),
+        LanguageConfig("Kannada", "kn", "kn-IN"),
+        LanguageConfig("Malayalam", "ml", "ml-IN"),
+        LanguageConfig("Marathi", "mr", "mr-IN"),
+        LanguageConfig("Gujarati", "gu", "gu-IN"),
+        LanguageConfig("Punjabi", "pa", "pa-IN"),
+        LanguageConfig("Urdu", "ur", "ur-IN"),
+        LanguageConfig("Bengali", "bn", "bn-IN"),
+        LanguageConfig("Spanish", "es", "es-ES"),
+        LanguageConfig("French", "fr", "fr-FR"),
+        LanguageConfig("German", "de", "de-DE"),
+        LanguageConfig("Italian", "it", "it-IT"),
+        LanguageConfig("Portuguese", "pt", "pt-PT"),
+        LanguageConfig("Arabic", "ar", "ar-SA"),
+        LanguageConfig("Japanese", "ja", "ja-JP"),
+        LanguageConfig("Korean", "ko", "ko-KR"),
+        LanguageConfig("Chinese", "zh", "zh-CN")
+    )
+
+
+    private fun langPrefKey(peer: String) = "chat_lang_$peer"
+
+    private fun saveSelectedLanguage(langCode: String) {
+        getSharedPreferences("app_prefs", MODE_PRIVATE)
+            .edit()
+            .putString(langPrefKey(receiverIdentity!!), langCode)
+            .apply()
+    }
+
+    private fun loadSelectedLanguage(): String {
+        return getSharedPreferences("app_prefs", MODE_PRIVATE)
+            .getString(
+                langPrefKey(receiverIdentity!!),
+              "en"
+            )!!
+    }
 
 
 
@@ -97,6 +146,27 @@ class ChatActivity : AppCompatActivity() {
         // -------- Bind Views --------
         chatContainer = findViewById(R.id.chatContainer)
         inputMessage = findViewById(R.id.inputMessage)
+
+        speechRecognizer = android.speech.SpeechRecognizer.createSpeechRecognizer(this)
+
+        speechIntent = Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(
+                android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
+            putExtra(android.speech.RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+        }
+
+        findViewById<ImageButton>(R.id.btnMic).setOnClickListener {
+            if (!isListening) {
+                startChatSTT()
+            } else {
+                stopChatSTT()
+            }
+        }
+
+        tvMicLang = findViewById(R.id.tvMicLang)
+
 
         spinnerTarget = findViewById(R.id.spinnerTarget)
 
@@ -115,15 +185,16 @@ class ChatActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("app_prefs", MODE_PRIVATE)
         myIdentity = prefs.getString("identity", "")?.replace("\\D".toRegex(), "") ?: ""
 
-        getSharedPreferences("chat_store", MODE_PRIVATE)
-            .edit()
-            .clear()
-            .apply()
+
 
 
         receiverIdentity = intent.getStringExtra("peer_identity")
+        val tvTitle = findViewById<TextView>(R.id.tvTitle)
 
-        receiverIdentity = intent.getStringExtra("peer_identity")
+        receiverIdentity?.let {
+            tvTitle.text = formatPhoneNumber(it)
+        }
+
 
         if (receiverIdentity == null) {
             finish()   // cannot open chat without peer
@@ -140,45 +211,65 @@ class ChatActivity : AppCompatActivity() {
         val adapter = ArrayAdapter(
             this,
             android.R.layout.simple_spinner_dropdown_item,
-            languages.map { it.first }
+            languages.map { it.label }
         )
+
 
         spinnerTarget.adapter = adapter
 
-        spinnerTarget.setSelection(0)
+        val savedLang = loadSelectedLanguage()
+        val index = languages.indexOfFirst { it.translateCode == savedLang }
+        spinnerTarget.setSelection(if (index >= 0) index else 0)
 
 
 
 
-        spinnerTarget.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
 
-            override fun onItemSelected(
-                parent: AdapterView<*>?,
-                ignoredView: View?,
-                position: Int,
-                id: Long
-            ) {
-                applyReceiverVisibility()
+
+        spinnerTarget.onItemSelectedListener =
+            object : AdapterView.OnItemSelectedListener {
+
+                override fun onItemSelected(
+                    parent: AdapterView<*>?,
+                    view: View?,
+                    position: Int,
+                    id: Long
+                ) {
+
+
+                    if (isListening) {
+                        Toast.makeText(
+                            this@ChatActivity,
+                            "Stop microphone before changing language",
+                            Toast.LENGTH_SHORT
+                        ).show()
+
+                        spinnerTarget.setSelection(
+                            languages.indexOfFirst {
+                                it.translateCode == loadSelectedLanguage()
+                            }
+                        )
+                        return
+                    }
+                    val lang = languages[position].translateCode
+                    saveSelectedLanguage(lang)
+
+                    // 🔥 re-translate all messages for new language
+                    for (msg in receivedMessages) {
+                        translateMessageForDisplay(msg)
+                    }
+                    applyReceiverVisibility()
+                    tvMicLang.text = languages[position].translateCode.uppercase()
+                }
+
+
+                override fun onNothingSelected(parent: AdapterView<*>?) {}
             }
 
 
-            override fun onNothingSelected(parent: AdapterView<*>?) {}
-        }
-
-
-
-
-
-
-
-
-
-
-
         // -------- Send Message --------
-        findViewById<Button>(R.id.btnSend).setOnClickListener {
-            val text = inputMessage.text.toString().trim()
-
+        findViewById<ImageButton>(R.id.btnSend).setOnClickListener {
+        val text = inputMessage.text.toString().trim()
             if (receiverIdentity == null) {
                 Toast.makeText(this, "Select a user first", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
@@ -191,42 +282,195 @@ class ChatActivity : AppCompatActivity() {
                 detectOriginalLanguage(msg)
 
 
-                translate(text, TranslateLanguage.ENGLISH) { translated ->
+                translate(text, "en") { translated ->
                     msg.englishText = translated
                     msg.englishView.text = translated
                     applyReceiverVisibility()
                 }
-
-
-
-
-
                 sendToBackend(text)
+
                 lifecycleScope.launch {
                     DbProvider.db.chatDao().insert(
                         ChatEntity(
                             myIdentity = myIdentity,
                             peerIdentity = receiverIdentity!!,
                             fromIdentity = myIdentity,
-                            originalText = text
+                            originalText = text,
+                            isRead = true   // sender message is always read
                         )
                     )
                 }
 
-
                 inputMessage.setText("")
 
-            }
 
+            }
         }
 
+        lifecycleScope.launch {
+            DbProvider.db.chatDao()
+                .markChatRead(myIdentity, receiverIdentity!!)
+        }
+    }
+
+    private fun formatPhoneNumber(number: String): String {
+        val clean = number.replace("\\D".toRegex(), "")
+
+        return when {
+            clean.startsWith("91") && clean.length == 12 ->
+                "+91 ${clean.substring(2, 7)} ${clean.substring(7)}"
+            clean.length == 10 ->
+                "+91 ${clean.substring(0, 5)} ${clean.substring(5)}"
+            else -> clean
+        }
     }
 
 
 
+    private fun startChatSTT() {
 
+        tvMicLang.visibility = View.VISIBLE
+        tvMicLang.alpha = 0f
+        tvMicLang.scaleX = 0.8f
+        tvMicLang.scaleY = 0.8f
+
+        tvMicLang.text = languages[spinnerTarget.selectedItemPosition]
+            .translateCode.uppercase()
+
+        tvMicLang.animate()
+            .alpha(1f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(200)
+            .start()
+
+
+        isListening = true
+
+        speechRecognizer.setRecognitionListener(object :
+            android.speech.RecognitionListener {
+
+            override fun onReadyForSpeech(params: Bundle?) {}
+
+            override fun onBeginningOfSpeech() {}
+
+            override fun onRmsChanged(rmsdB: Float) {}
+
+            override fun onBufferReceived(buffer: ByteArray?) {}
+
+            override fun onEndOfSpeech() {
+                isListening = false
+                hideMicBadge()
+            }
+
+
+            override fun onError(error: Int) {
+                isListening = false
+                hideMicBadge()
+            }
+
+            override fun onResults(results: Bundle) {
+                isListening = false
+                hideMicBadge()
+                val matches =
+                    results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+
+                if (!matches.isNullOrEmpty()) {
+
+                    val spokenText = matches[0]
+
+                    LanguageIdentification.getClient()
+                        .identifyLanguage(spokenText)
+                        .addOnSuccessListener { detected ->
+
+                            val selectedLang =
+                                languages[spinnerTarget.selectedItemPosition].translateCode
+
+                            if (detected != "und" && detected != selectedLang) {
+                                Toast.makeText(
+                                    this@ChatActivity,
+                                    "Detected language differs from selected.",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+
+                    inputMessage.setText(spokenText)
+                    inputMessage.setSelection(spokenText.length)
+                }
+            }
+
+
+            override fun onPartialResults(partialResults: Bundle) {
+                val partial =
+                    partialResults.getStringArrayList(
+                        android.speech.SpeechRecognizer.RESULTS_RECOGNITION
+                    )
+                if (!partial.isNullOrEmpty()) {
+                    inputMessage.setText(partial[0])
+                    inputMessage.setSelection(inputMessage.text.length)
+                }
+            }
+
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+        speechIntent.putExtra(
+            RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+            RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+        )
+
+        val selected = languages[spinnerTarget.selectedItemPosition]
+
+        speechIntent.putExtra(
+            RecognizerIntent.EXTRA_LANGUAGE,
+            selected.sttLocale
+        )
+
+        speechIntent.putExtra(
+            RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE,
+            selected.sttLocale
+        )
+
+
+
+
+        speechRecognizer.startListening(speechIntent)
+        tvMicLang.postDelayed({
+            if (isListening) {
+                stopChatSTT()
+            }
+        }, 6000) // 6 seconds timeout
+
+    }
+
+    private fun hideMicBadge() {
+        tvMicLang.animate()
+            .alpha(0f)
+            .setDuration(150)
+            .withEndAction {
+                tvMicLang.visibility = View.GONE
+            }
+            .start()
+    }
+
+
+    private fun stopChatSTT() {
+        tvMicLang.animate()
+            .alpha(0f)
+            .setDuration(150)
+            .withEndAction {
+                tvMicLang.visibility = View.GONE
+            }
+            .start()
+
+        isListening = false
+        speechRecognizer.stopListening()
+    }
 
     private fun loadStoredMessages() {
+        chatContainer.removeAllViews()
+        receivedMessages.clear()
+
         val me = myIdentity
         val peer = receiverIdentity ?: return
 
@@ -234,85 +478,128 @@ class ChatActivity : AppCompatActivity() {
             val msgs = DbProvider.db.chatDao()
                 .getConversation(me, peer)
 
-            msgs.forEach {
-                val msg = if (it.fromIdentity == me) {
-                    createSenderMessage(it.originalText)
+            msgs.forEach { entity ->
+
+                val msg = if (entity.fromIdentity == me) {
+                    createSenderMessage(entity.originalText)
                 } else {
-                    createReceiverMessage(it.fromIdentity, it.originalText)
+                    createReceiverMessage(entity.fromIdentity, entity.originalText)
                 }
-                msg.dbId = it.id
+
+                msg.dbId = entity.id
                 receivedMessages.add(msg)
-                detectOriginalLanguage(msg)
+
+                // Detect language
+                LanguageIdentification.getClient()
+                    .identifyLanguage(entity.originalText)
+                    .addOnSuccessListener { lang ->
+                        msg.originalLang =
+                            if (lang == "und" || lang.isBlank()) "en" else lang
+
+                        // After detecting language → translate
+                        translateMessageForDisplay(msg)
+                    }
             }
         }
     }
 
 
-    private fun detectOriginalLanguage(msg: ChatMessage) {
-        if (msg.originalLang != null) return
 
+
+    private fun detectOriginalLanguage(msg: ChatMessage) {
         LanguageIdentification.getClient()
             .identifyLanguage(msg.original)
             .addOnSuccessListener { lang ->
-                msg.originalLang = lang
-                applyReceiverVisibility()   // 🔥 ADD THIS
+                msg.originalLang = if (lang == "und" || lang.isNullOrBlank()) {
+                    "en"
+                } else {
+                    lang
+                }
+                applyReceiverVisibility()
+            }
+            .addOnFailureListener {
+                msg.originalLang = "en"
+                applyReceiverVisibility()
             }
     }
 
+    private fun translateMessageForDisplay(msg: ChatMessage) {
+
+        val selectedLang = languages[spinnerTarget.selectedItemPosition].translateCode
+        val originalLang = msg.originalLang ?: "en"
+
+        // --- ENGLISH CACHE ---
+        if (originalLang != "en" && msg.englishText == null) {
+            translate(msg.original, "en") { en ->
+                msg.englishText = en
+                msg.englishView.text = en
+                applyReceiverVisibility()
+            }
+        }
+
+        // --- TARGET CACHE ---
+        if (selectedLang != "en" && selectedLang != originalLang &&
+            !msg.targetTranslations.containsKey(selectedLang)
+        ) {
+            translate(msg.original, selectedLang) { translated ->
+                msg.targetTranslations[selectedLang] = translated
+                msg.targetView?.text = translated
+                applyReceiverVisibility()
+            }
+        }
+
+        applyReceiverVisibility()
+    }
+
+
+
+
 
     private fun applyReceiverVisibility() {
-        val selectedLang = languages[spinnerTarget.selectedItemPosition].second
+
+        val selectedLang = languages[spinnerTarget.selectedItemPosition].translateCode
 
         for (msg in receivedMessages) {
 
             val originalView = msg.container.getChildAt(0) as TextView
             val englishView = msg.englishView
             val targetView = msg.targetView
-            val originalLang = msg.originalLang ?: continue
+            val originalLang = msg.originalLang ?: "en"
 
-            // 1️⃣ ORIGINAL — always visible
-            originalView.visibility = View.VISIBLE
+            originalView.visibility = View.GONE
+            englishView.visibility = View.GONE
+            targetView?.visibility = View.GONE
 
-            // 2️⃣ ENGLISH — always visible if original ≠ English
-            if (originalLang != TranslateLanguage.ENGLISH) {
-                englishView.visibility = View.VISIBLE
+            val isSender = msg.from == myIdentity
 
-                if (msg.englishText != null) {
+            if (isSender) {
+                originalView.visibility = View.VISIBLE
+
+                if (originalLang != "en" && msg.englishText != null) {
+                    englishView.visibility = View.VISIBLE
                     englishView.text = msg.englishText
-                } else {
-                    englishView.text = "Translating..."
-                    translate(msg.original, TranslateLanguage.ENGLISH) { translated ->
-                        msg.englishText = translated
-                        englishView.text = translated
-                    }
                 }
+
             } else {
-                englishView.visibility = View.GONE
-            }
+                originalView.visibility = View.VISIBLE
 
-            // 3️⃣ TARGET TRANSLATION (spinner-based)
-            if (
-                targetView != null &&
-                selectedLang != TranslateLanguage.ENGLISH &&
-                selectedLang != originalLang
-            ) {
-                targetView.visibility = View.VISIBLE
-
-                val cached = msg.targetTranslations[selectedLang]
-                if (cached != null) {
-                    targetView.text = cached
-                } else {
-                    targetView.text = "Translating..."
-                    translate(msg.original, selectedLang) {
-                        msg.targetTranslations[selectedLang] = it
-                        targetView.text = it
-                    }
+                if (originalLang != "en" && msg.englishText != null) {
+                    englishView.visibility = View.VISIBLE
+                    englishView.text = msg.englishText
                 }
-            } else {
-                targetView?.visibility = View.GONE
+
+                if (selectedLang != "en" &&
+                    selectedLang != originalLang &&
+                    msg.targetTranslations.containsKey(selectedLang)
+                ) {
+                    targetView?.visibility = View.VISIBLE
+                    targetView?.text = msg.targetTranslations[selectedLang]
+                }
             }
         }
     }
+
+
 
 
 
@@ -322,9 +609,6 @@ class ChatActivity : AppCompatActivity() {
         if (a == null || b == null) return false
         return a.trim().equals(b.trim(), ignoreCase = true)
     }
-
-
-
 
     // ================= Dock =================
 
@@ -420,16 +704,7 @@ class ChatActivity : AppCompatActivity() {
             if (fromNorm == myIdentity) return
 
             val msg = createReceiverMessage(from, original)
-            lifecycleScope.launch {
-                DbProvider.db.chatDao().insert(
-                    ChatEntity(
-                        myIdentity = myIdentity,
-                        peerIdentity = from,
-                        fromIdentity = from,
-                        originalText = original
-                    )
-                )
-            }
+
 
             receivedMessages.add(msg)
             detectOriginalLanguage(msg)
@@ -439,16 +714,18 @@ class ChatActivity : AppCompatActivity() {
 
 
             // English (store once)
-            translate(original, TranslateLanguage.ENGLISH) { translated ->
+            translate(original, "en") { translated ->
                 msg.englishText = translated
                 msg.englishView.text = translated
                 applyReceiverVisibility()
             }
 
 
-            val selectedLang = languages[spinnerTarget.selectedItemPosition].second
+            val selectedLang =
+                languages[spinnerTarget.selectedItemPosition].translateCode
 
-            if (selectedLang != TranslateLanguage.ENGLISH) {
+
+            if (selectedLang != "en") {
                 translate(original, selectedLang) { translated ->
                     msg.targetTranslations[selectedLang] = translated
                     msg.targetView?.text = translated
@@ -473,7 +750,7 @@ class ChatActivity : AppCompatActivity() {
     @RequiresApi(Build.VERSION_CODES.O)
     override fun onStart() {
         super.onStart()
-
+        AppVisibility.currentChatPeer = receiverIdentity
         val filter = IntentFilter(ACTION_CHAT_MESSAGE)
 
         registerReceiver(
@@ -624,43 +901,38 @@ class ChatActivity : AppCompatActivity() {
         target: String,
         onResult: (String) -> Unit
     ) {
-        LanguageIdentification.getClient()
-            .identifyLanguage(text)
-            .addOnSuccessListener { sourceLang ->
 
-                // SAFETY: if already same language
-                if (sourceLang == target) {
-                    onResult(text)
-                    applyReceiverVisibility()
-                    return@addOnSuccessListener
-                }
+        val json = JSONObject().apply {
+            put("text", text)
+            put("targetLang", target)
+        }
 
-                val translator = Translation.getClient(
-                    TranslatorOptions.Builder()
-                        .setSourceLanguage(sourceLang)
-                        .setTargetLanguage(target)
-                        .build()
-                )
+        val body = json.toString()
+            .toRequestBody("application/json".toMediaType())
 
-                translator.downloadModelIfNeeded()
-                    .addOnSuccessListener {
-                        translator.translate(text)
-                            .addOnSuccessListener { translated ->
-                                onResult(translated)
-                                applyReceiverVisibility() // 🔥 FORCE UI REFRESH
-                            }
-                            .addOnFailureListener {
-                                applyReceiverVisibility()
-                            }
-                    }
-                    .addOnFailureListener {
-                        applyReceiverVisibility()
-                    }
+        val req = Request.Builder()
+            .url("https://nodical-earlie-unyieldingly.ngrok-free.dev/chat/translate")
+            .post(body)
+            .build()
+
+        OkHttpClient().newCall(req).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                runOnUiThread { onResult(text) }
             }
-            .addOnFailureListener {
-                applyReceiverVisibility()
+
+            override fun onResponse(call: Call, response: Response) {
+                val result = response.body?.string()
+                val translated =
+                    JSONObject(result ?: "{}").optString("translated", text)
+
+                runOnUiThread { onResult(translated) }
             }
+        })
     }
+
+
+
+
 
 
 
@@ -671,9 +943,19 @@ class ChatActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
+        AppVisibility.currentChatPeer = null
+        // 🔥 FORCE MARK READ WHEN LEAVING CHAT
+        lifecycleScope.launch {
+            DbProvider.db.chatDao()
+                .markChatRead(myIdentity, receiverIdentity!!)
+        }
         unregisterReceiver(chatReceiver)
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        speechRecognizer.destroy()
+    }
 
 
 }

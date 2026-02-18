@@ -2,6 +2,7 @@ package com.example.myapplication
 
 import android.app.Activity
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.provider.ContactsContract
 import android.text.Editable
@@ -34,6 +35,9 @@ class CallActivity : AppCompatActivity() {
 
     private lateinit var edtPhoneNumber: EditText
     private lateinit var spinnerCountryCode: Spinner
+
+
+
     private lateinit var searchBar: EditText
     private lateinit var btnAudioCall: Button
     private lateinit var btnVideoCall: Button
@@ -75,6 +79,38 @@ class CallActivity : AppCompatActivity() {
         return countryCode + cleaned
     }
 
+    private val voiceListener = object : VoiceCall.Listener {
+
+        override fun onRinging(call: VoiceCall) {
+            Log.d("CallActivity", "📞 Ringing")
+        }
+
+        override fun onConnected(call: VoiceCall) {
+            Log.d("CallActivity", "✅ Caller connected")
+            CallHolder.activeCall = call
+        }
+
+        override fun onDisconnected(call: VoiceCall, error: CallException?) {
+            Log.d("CallActivity", "📴 Caller disconnected: ${error?.message}")
+            CallHolder.activeCall = null
+        }
+
+        override fun onConnectFailure(call: VoiceCall, error: CallException) {
+            Log.e("CallActivity", "❌ Call failed: ${error.message}")
+            CallHolder.activeCall = null
+            runOnUiThread {
+                Toast.makeText(this@CallActivity, "Call failed", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        override fun onReconnecting(call: VoiceCall, error: CallException) {
+            Log.w("CallActivity", "🔄 Reconnecting")
+        }
+
+        override fun onReconnected(call: VoiceCall) {
+            Log.d("CallActivity", "🔁 Reconnected")
+        }
+    }
 
 
 
@@ -92,6 +128,9 @@ class CallActivity : AppCompatActivity() {
         btnDeleteNumber = findViewById(R.id.btnDeleteNumber)
         dialerPanel = findViewById(R.id.dialerPanel)
         fabDialer = findViewById(R.id.fabDialer)
+
+
+
 
 
         val handle = findViewById<View>(R.id.dragHandle)
@@ -183,7 +222,7 @@ class CallActivity : AppCompatActivity() {
         dockSettings = findViewById(R.id.dock_settings_layout)
         highlightCurrentPage(dockCalls)
 
-        dockChats.setOnClickListener { startActivity(Intent(this, ChatActivity::class.java)) }
+        dockChats.setOnClickListener { startActivity(Intent(this, ChatListActivity::class.java)) }
         dockSettings.setOnClickListener { startActivity(Intent(this, SettingsActivity::class.java)) }
         dockTranslate.setOnClickListener { startActivity(Intent(this, MainActivity::class.java)) }
 
@@ -277,7 +316,7 @@ class CallActivity : AppCompatActivity() {
                 override fun onReconnected(call: VoiceCall) {}
             })
 
-            CallHolder.activeCall = activeCall
+
 
             val i = Intent(this, CallScreenActivity::class.java).apply {
                 putExtra("call_mode", CallMode.PSTN_AUDIO.name)
@@ -289,115 +328,63 @@ class CallActivity : AppCompatActivity() {
 
 
 
+
     private fun startSmartVoiceCall(targetNumber: String) {
+
+        // 0️⃣ Get caller identity FIRST
         val prefs = getSharedPreferences("app_prefs", MODE_PRIVATE)
-        val fromIdentity = prefs.getString("identity", null)
-        if (fromIdentity.isNullOrEmpty()) {
-            Toast.makeText(this, "Login expired — please re-login.", Toast.LENGTH_LONG).show()
-            return
-        }
-
-        CallHolder.isOutgoing = true
-
-        val app = applicationContext as VoiceApp
-
-        if (!app.isTwilioReady) {
-            Toast.makeText(this, "Twilio not registered yet, please wait", Toast.LENGTH_SHORT).show()
-            return
-        }
-        // use prefs-stored identity (digits only)
-        val rawFrom = prefs.getString("identity", fromIdentity) ?: fromIdentity ?: ""
-        val fromDigits = rawFrom.replace("[^0-9]".toRegex(), "")
-
-// callee: prefer digits-only identity for server; keep e164 for display where needed
-        val calleeE164 = normalizePhoneWithCountry(targetNumber) // +E.164
-        val toDigits = calleeE164.replace("[^0-9]".toRegex(), "")
-
-// Build payload using digits-only identities (server expects Twilio identities)
-        val payload = JSONObject().apply {
-            put("fromIdentity", fromDigits)
-            put("toIdentity", toDigits)
-            // optionally include display phone for server logs if your backend supports it:
-            put("from_display", prefs.getString("identity_display", ""))
-            put("to_display", calleeE164)
-        }
-
-        Log.d("CallActivity", "Calling backend /call-user (from=$fromDigits to=$toDigits)")
-
-        val tokenIdentity = fromDigits
-        httpGet("$BACKEND_BASE_URL/voice-token?identity=$tokenIdentity"){ ok, json, err ->
-            runOnUiThread {
-                if (!ok) {
-                    Toast.makeText(this, "Call setup failed: $err", Toast.LENGTH_LONG).show()
-                    return@runOnUiThread
-                }
+        val fromDigits = prefs.getString("identity", "")!!
+            .replace("[^0-9]".toRegex(), "")
 
 
 
-                val type = json.optString("type")
-                val callee = json.optString("callee")
+        // 1️⃣ Get Voice token
+        httpGet("$BACKEND_BASE_URL/voice-token?identity=$fromDigits") { ok, json, err ->
+            if (!ok) return@httpGet
 
-                if (type == "in-app" && !callee.isNullOrEmpty()) {
-                    // ✅ In-app call
-                    httpGet("$BACKEND_BASE_URL/voice-token?identity=$fromIdentity") { ok2, tokJson, err2 ->
-                        if (!ok2) {
-                            runOnUiThread {
-                                Toast.makeText(this, "Token error: $err2", Toast.LENGTH_LONG).show()
-                            }
-                            return@httpGet
-                        }
-                        val token = tokJson.optString("token")
-                        val options = ConnectOptions.Builder(token)
-                            .params(mapOf("To" to callee))
-                            .build()
-                        Log.d("TwilioDebug", "🔗 Voice.connect() with token=${token.take(10)}... to=${callee} from=${fromIdentity}")
-
-                        val activeCall = com.twilio.voice.Voice.connect(this, options, object : com.twilio.voice.Call.Listener {
-
-                            override fun onConnected(call: com.twilio.voice.Call) {
-                                Log.d("SmartCall", "✅ Connected")
-                            }
-
-                            override fun onRinging(call: com.twilio.voice.Call) {
-                                Log.d("SmartCall", "📞 Ringing...")
-                            }
-
-                            override fun onDisconnected(call: com.twilio.voice.Call, error: com.twilio.voice.CallException?) {
-                                Log.d("SmartCall", "📴 Disconnected")
-                            }
-
-                            override fun onConnectFailure(call: com.twilio.voice.Call, error: com.twilio.voice.CallException) {
-                                runOnUiThread {
-                                    Toast.makeText(this@CallActivity, "Connect failed: ${error.message}", Toast.LENGTH_LONG).show()
-                                }
-                            }
-
-
-                            override fun onReconnecting(call: com.twilio.voice.Call, error: com.twilio.voice.CallException) {}
-                            override fun onReconnected(call: com.twilio.voice.Call) {}
-                        })
-                        Log.d("TwilioDebug", "📥 /call-user response: ok=$ok type=$type callee=$callee")
-
-
-                        CallHolder.activeCall = activeCall
-
-                        // ✅ Open call screen ONCE
-                        runOnUiThread {
-                            val i = Intent(this@CallActivity, CallScreenActivity::class.java).apply {
-                                putExtra("call_mode", CallMode.PSTN_AUDIO.name)
-                                putExtra("display_name", callee)
-                                putExtra("to_identity", callee)
-                            }
-                            startActivity(i)
-                        }
-                    }
-                } else {
-                    // PSTN fallback
-                    startPstnCall(targetNumber)
-                }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(Intent(this, CallForegroundService::class.java))
+            } else {
+                startService(Intent(this, CallForegroundService::class.java))
             }
+
+
+            val token = json.optString("token")
+
+            // 2️⃣ CONNECT CALLER VIA VOICE SDK
+            val options = ConnectOptions.Builder(token)
+                .params(mapOf(
+                    "To" to targetNumber.replace("[^0-9]".toRegex(), "")
+                ))
+                .build()
+
+            CallHolder.activeCall = Voice.connect(
+                this,
+                options,
+                voiceListener
+            )
+
+            // 3️⃣ Ask backend to call callee
+            httpPost(
+                "$BACKEND_BASE_URL/call-user",
+                JSONObject().apply {
+                    put("fromIdentity", fromDigits)
+                    put("toIdentity", targetNumber.replace("[^0-9]".toRegex(), ""))
+                }
+            ) { _, _, _ -> }
+
+            // 4️⃣ NOW open UI
+            startActivity(
+                Intent(this, CallScreenActivity::class.java).apply {
+                    putExtra("call_mode", "PSTN_AUDIO")
+                    putExtra("display_name", targetNumber)
+                    putExtra("start_timer_now", false)
+                }
+            )
         }
     }
+
+
 
 
     // ---------- Outgoing App↔App video via Twilio Video ----------
@@ -569,6 +556,10 @@ class CallActivity : AppCompatActivity() {
             }
         })
     }
+
+
+
+
 
     private fun isLikelyJson(contentType: String?): Boolean =
         contentType?.lowercase()?.contains("application/json") == true

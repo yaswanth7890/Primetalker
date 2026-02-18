@@ -27,6 +27,7 @@ class ChatListAdapter(
     inner class VH(v: View) : RecyclerView.ViewHolder(v) {
         val name: TextView = v.findViewById(R.id.tvPeer)
         val last: TextView = v.findViewById(R.id.tvLastMessage)
+        val unread: TextView = v.findViewById(R.id.tvUnread)
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
@@ -36,21 +37,27 @@ class ChatListAdapter(
     }
 
 
-
     override fun onBindViewHolder(h: VH, pos: Int) {
         val item = getItem(pos)
+
         h.name.text = item.peerIdentity
         h.last.text = item.lastMessage ?: ""
 
-        // Normal click → open chat
+        if (item.unreadCount > 0) {
+            h.unread.visibility = View.VISIBLE
+            h.unread.text = item.unreadCount.toString()
+        } else {
+            h.unread.visibility = View.GONE
+        }
+
         h.itemView.setOnClickListener {
             onClick(item.peerIdentity)
+        }
 
-            // Long press → delete chat
-            h.itemView.setOnLongClickListener {
-                onLongPress(item.peerIdentity)
-                true
-            }
+        h.itemView.setOnLongClickListener {
+            onLongPress(item.peerIdentity)
+            true
         }
     }
+
 }

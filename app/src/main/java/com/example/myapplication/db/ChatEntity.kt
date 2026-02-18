@@ -13,7 +13,10 @@ data class ChatEntity(
     val fromIdentity: String,    // who sent this message
 
     val originalText: String,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+
+    val isRead: Boolean = false
+
 
 
 

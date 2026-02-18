@@ -17,26 +17,33 @@
             android:id="@+id/tvTitle"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_centerInParent="true"
-            android:text="Chat"
+            android:layout_centerVertical="true"
+            android:layout_toStartOf="@id/spinnerTarget"
+            android:layout_alignParentStart="true"
             android:textSize="18sp"
             android:textStyle="bold"
-            android:textColor="@android:color/white"/>
+            android:textColor="@android:color/white"
+            android:maxLines="1"
+            android:ellipsize="end"/>
 
-        <!-- RECEIVER LANGUAGE ONLY -->
         <Spinner
             android:id="@+id/spinnerTarget"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_alignParentEnd="true"
             android:layout_centerVertical="true"
-            android:backgroundTint="@android:color/white"/>
+            android:paddingEnd="4dp"/>
     </RelativeLayout>
 
 
 
 
+
     <!-- Chat Area -->
+
+
+    <!-- Input -->
+
     <ScrollView
         android:id="@+id/chatScroll"
         android:layout_width="match_parent"
@@ -48,38 +55,86 @@
             android:id="@+id/chatContainer"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical"/>
+            android:orientation="vertical" />
     </ScrollView>
 
-
-
-
-
-
-    <!-- Input -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:padding="10dp"
+        android:background="#FFFFFF"
         android:orientation="horizontal"
-        android:padding="8dp"
-        android:background="#FFFFFF">
+        android:gravity="center_vertical">
 
-        <EditText
-            android:id="@+id/inputMessage"
+        <!-- Input container -->
+        <RelativeLayout
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="50dp"
             android:layout_weight="1"
-            android:hint="Type in any language"
-            android:inputType="textMultiLine"
-            android:maxLines="4"
-            android:padding="10dp"
-            android:background="#EEEEEE"/>
+            android:background="@drawable/bg_input_rounded"
+            android:elevation="2dp">
 
-        <Button
+            <EditText
+                android:id="@+id/inputMessage"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:layout_alignParentStart="true"
+                android:layout_toStartOf="@id/micContainer"
+                android:hint="Type a message..."
+                android:background="@android:color/transparent"
+                android:inputType="textMultiLine"
+                android:maxLines="4"
+                android:gravity="center_vertical"
+                android:textSize="15sp"
+                android:textColor="#222222"
+                android:paddingStart="16dp"
+                android:paddingEnd="8dp"/>
+
+            <!-- Mic at extreme right -->
+            <FrameLayout
+                android:id="@+id/micContainer"
+                android:layout_width="44dp"
+                android:layout_height="match_parent"
+                android:layout_alignParentEnd="true">
+
+                <ImageButton
+                    android:id="@+id/btnMic"
+                    android:layout_width="38dp"
+                    android:layout_height="38dp"
+                    android:layout_gravity="center"
+                    android:background="@drawable/bg_mic_circle"
+                    android:src="@drawable/ic_mic_on"
+                    android:contentDescription="Speak" />
+
+                <TextView
+                    android:id="@+id/tvMicLang"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="EN"
+                    android:textSize="9sp"
+                    android:textStyle="bold"
+                    android:textColor="@android:color/white"
+                    android:background="@drawable/bg_lang_badge"
+                    android:visibility="gone"
+                    android:alpha="0"
+                    android:layout_gravity="top|center_horizontal"
+                    android:translationY="-6dp"/>
+            </FrameLayout>
+
+        </RelativeLayout>
+
+        <!-- Send Button -->
+        <ImageButton
             android:id="@+id/btnSend"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Send"/>
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_marginStart="4dp"
+            android:background="@drawable/bg_send_circle"
+            android:padding="10dp"
+            android:scaleType="centerInside"
+            android:src="@drawable/ic_send"
+            android:contentDescription="Send"/>
+
     </LinearLayout>
 
     <!-- Bottom Dock -->

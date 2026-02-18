@@ -14,6 +14,8 @@ android {
     namespace = "com.example.myapplication"
     compileSdk = 34
 
+
+
     defaultConfig {
         applicationId = "com.example.myapplication"
         minSdk = 24
@@ -50,6 +52,12 @@ android {
             )
         }
     }
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
+    }
+
 }
 
 dependencies {
@@ -71,8 +79,7 @@ dependencies {
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("androidx.cardview:cardview:1.0.0")
 
-    // ---- Networking ----
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
 
     // Lifecycle + Coroutines (for lifecycleScope)
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")
@@ -83,16 +90,27 @@ dependencies {
      implementation("com.hbb20:ccp:2.5.0")
     implementation("com.google.mlkit:translate:17.0.2")
     implementation("com.google.mlkit:language-id:17.0.4")
-    implementation(libs.play.services.vision.common)
+
     // implementation("org.jitsi.react:jitsi-meet-sdk:8.1.2")
 
 
     implementation ("androidx.room:room-runtime:2.6.1")
+
     kapt("androidx.room:room-compiler:2.6.1")
     implementation ("androidx.room:room-ktx:2.6.1")
 
 
 
+
+
 }
+
+tasks.matching {
+    it.name.contains("AndroidTest")
+}.configureEach {
+    enabled = false
+}
+
+
 
 

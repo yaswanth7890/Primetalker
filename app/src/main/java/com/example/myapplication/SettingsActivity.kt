@@ -11,8 +11,14 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.cardview.widget.CardView
+import org.json.JSONObject
+
 
 class SettingsActivity : AppCompatActivity() {
+
+    private val BACKEND_BASE_URL =
+        "https://nodical-earlie-unyieldingly.ngrok-free.dev"
+
 
     private lateinit var spinnerLang: Spinner
     private lateinit var switchNotifications: Switch
@@ -27,14 +33,52 @@ class SettingsActivity : AppCompatActivity() {
     private lateinit var dockCalls: LinearLayout
     private lateinit var dockSettings: LinearLayout
 
-    private val languages = listOf("English", "Hindi", "Telugu", "Tamil", "Kannada")
+
+
+    private val languages = listOf("English",
+        "Hindi",
+        "Telugu",
+        "Tamil",
+        "Kannada",
+        "Malayalam",
+        "Marathi",
+        "Bengali",
+        "Gujarati",
+        "Punjabi",
+        "Urdu",
+        "Spanish",
+        "French",
+        "German",
+        "Italian",
+        "Portuguese",
+        "Arabic",
+        "Japanese",
+        "Korean",
+        "Chinese"
+    )
     private val languageMap = mapOf(
         "English" to "en",
         "Hindi" to "hi",
         "Telugu" to "te",
         "Tamil" to "ta",
-        "Kannada" to "kn"
+        "Kannada" to "kn",
+        "Malayalam" to "ml",
+        "Marathi" to "mr",
+        "Bengali" to "bn",
+        "Gujarati" to "gu",
+        "Punjabi" to "pa",
+        "Urdu" to "ur",
+        "Spanish" to "es",
+        "French" to "fr",
+        "German" to "de",
+        "Italian" to "it",
+        "Portuguese" to "pt",
+        "Arabic" to "ar",
+        "Japanese" to "ja",
+        "Korean" to "ko",
+        "Chinese" to "zh"
     )
+
 
     private val prefs by lazy { getSharedPreferences("app_prefs", MODE_PRIVATE) }
 
@@ -59,6 +103,8 @@ class SettingsActivity : AppCompatActivity() {
         set(v) = prefs.edit().putString("profile_name", v).apply()
 
     override fun onCreate(savedInstanceState: Bundle?) {
+
+
         super.onCreate(savedInstanceState)
         LangManager.init(this)
         setContentView(R.layout.activity_settings)
@@ -77,7 +123,7 @@ class SettingsActivity : AppCompatActivity() {
 
         // Bottom dock
         highlightCurrentPage(dockSettings)
-        dockChats.setOnClickListener { startActivity(Intent(this, ChatActivity::class.java)) }
+        dockChats.setOnClickListener { startActivity(Intent(this, ChatListActivity::class.java)) }
         dockCalls.setOnClickListener { startActivity(Intent(this, CallActivity::class.java)) }
         dockTranslate.setOnClickListener { startActivity(Intent(this, MainActivity::class.java)) }
 
@@ -103,13 +149,28 @@ class SettingsActivity : AppCompatActivity() {
         spinnerLang.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             var firstCall = true
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+
                 if (firstCall) { firstCall = false; return }
                 val selectedCode = languageMap[languages[position]] ?: "en"
+
                 if (selectedCode != preferredLanguage) {
                     LangManager.setLanguage(this@SettingsActivity, selectedCode)
                     preferredLanguage = selectedCode
                     applyTranslations()
                 }
+                val identity = prefs.getString("identity", "")!!
+                    .replace("[^0-9]".toRegex(), "")
+
+                val json = JSONObject().apply {
+                    put("identity", identity)
+                    put("preferredLang", selectedCode)
+                }
+
+                httpPost(
+                    "$BACKEND_BASE_URL/set-preferred-language",
+                    json
+                ) { _, _, _ -> }
+
             }
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
@@ -226,4 +287,38 @@ class SettingsActivity : AppCompatActivity() {
             } catch (_: Exception) {}
         }
     }
+
+    private fun httpPost(
+        url: String,
+        body: JSONObject,
+        callback: (success: Boolean, code: Int, response: String?) -> Unit
+    ) {
+        Thread {
+            try {
+                val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.doOutput = true
+
+                conn.outputStream.use { os ->
+                    os.write(body.toString().toByteArray(Charsets.UTF_8))
+                }
+
+                val code = conn.responseCode
+                val stream =
+                    if (code in 200..299) conn.inputStream else conn.errorStream
+
+                val response = stream?.bufferedReader()?.readText()
+                runOnUiThread {
+                    callback(code in 200..299, code, response)
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    callback(false, -1, e.message)
+                }
+            }
+        }.start()
+    }
+
+
 }

@@ -5,4 +5,3 @@ enum class CallMode {
     APP_AUDIO,
     APP_VIDEO
 }
-
