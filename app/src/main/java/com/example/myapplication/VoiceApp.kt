@@ -15,7 +15,8 @@ import okhttp3.*
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
-
+import androidx.work.*
+import java.util.concurrent.TimeUnit
 class VoiceApp : Application() {
 
     private val BASE_URL = "https://nodical-earlie-unyieldingly.ngrok-free.dev"
@@ -36,6 +37,7 @@ class VoiceApp : Application() {
         Voice.setLogLevel(LogLevel.ALL)
 
         DbProvider.init(this)
+        startPendingWorker()
 
         val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
         var identity = prefs.getString("identity", null)
@@ -56,6 +58,27 @@ class VoiceApp : Application() {
     }
 
 
+    private fun startPendingWorker() {
+
+        val constraints = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .build()
+
+        val request =
+            PeriodicWorkRequestBuilder<PendingMessageWorker>(
+                15,
+                TimeUnit.MINUTES
+            )
+                .setConstraints(constraints)
+                .build()
+
+        WorkManager.getInstance(this)
+            .enqueueUniquePeriodicWork(
+                "pendingMessages",
+                ExistingPeriodicWorkPolicy.KEEP,
+                request
+            )
+    }
     companion object {
         private var currentToken: String? = null
         fun setCurrentToken(token: String) { currentToken = token }

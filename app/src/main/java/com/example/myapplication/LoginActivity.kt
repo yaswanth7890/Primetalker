@@ -217,7 +217,16 @@ class LoginActivity : AppCompatActivity() {
                     }
 
                     toast("Login success")
-                    openMainActivity()
+
+                    lifecycleScope.launch {
+
+                        ChatHistorySync.sync(
+                            this@LoginActivity,
+                            twilioIdentity
+                        )
+
+                        openMainActivity()
+                    }
                 }
 
             }

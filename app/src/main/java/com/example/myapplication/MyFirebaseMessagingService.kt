@@ -47,10 +47,30 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
 
         // 🔥 REQUIRED for Room usage inside FCM
         DbProvider.init(applicationContext)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+            val channel = NotificationChannel(
+                CHAT_CHANNEL_ID,
+                "Chat Messages",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                enableVibration(true)
+                enableLights(true)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            }
+
+            nm.createNotificationChannel(channel)
+        }
     }
 
 
     private val CHANNEL_ID = "incoming_call_channel"
+    private val CHAT_CHANNEL_ID = "chat_messages_channel"
+    private val CHAT_GROUP = "chat_messages_group"
+    private val chatNotificationStore = mutableMapOf<String, MutableList<String>>()
     private val BASE_URL = "https://nodical-earlie-unyieldingly.ngrok-free.dev" // 🔧 change if using ngrok or deployed server
 
     override fun onNewToken(token: String) {
@@ -106,6 +126,20 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
                     // Save invite for later accept/reject
                     IncomingCallHolder.invite = callInvite
 
+                    // 🔥 Also store in service backup (for killed app case)
+                    val svcIntent = Intent(
+                        this@MyFirebaseMessagingService,
+                        CallNotificationService::class.java
+                    ).apply {
+                        action = CallNotificationService.ACTION_STORE_INVITE
+                        putExtra("invite", callInvite)
+                    }
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                        this@MyFirebaseMessagingService.startForegroundService(svcIntent)
+                    else
+                        this@MyFirebaseMessagingService.startService(svcIntent)
+
                     // ❌ DO NOT open UI here
                     Log.d("Twilio", "CallInvite received, waiting for FCM UI trigger")
                 }
@@ -153,27 +187,71 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
             "CHAT_MESSAGE" -> {
 
                 val prefs = getSharedPreferences("app_prefs", MODE_PRIVATE)
-                val myIdentity = prefs.getString("identity", "")!!
-                    .replace("\\D".toRegex(), "")
+                val myIdentity = PhoneUtils.normalizeIdentity(
+                    prefs.getString("identity", "")!!
+                )
 
-                val peer = data["sender"]!!.replace("\\D".toRegex(), "")
-                val text = data["original"]!!
+                val peer = PhoneUtils.normalizeIdentity(
+                    data["sender"]!!
+                )
+                val encrypted = data["original"]!!
+                val text = CryptoUtils.decrypt(encrypted)
+
+                Log.d("CHAT_DEBUG", "encrypted=$encrypted")
+                Log.d("CHAT_DEBUG", "decrypted=$text")
                 val isChatOpenForThisPeer = AppVisibility.currentChatPeer == peer
+                val messageId = data["messageId"] ?: java.util.UUID.randomUUID().toString()
+                if (!isChatOpenForThisPeer) {
+                    showChatNotification(peer, text)
+                }
                 CoroutineScope(Dispatchers.IO).launch {
-                    DbProvider.db.chatDao().insert(
-                        ChatEntity(
-                            myIdentity = myIdentity,
-                            peerIdentity = peer,
-                            fromIdentity = peer,
-                            originalText = text,
-                            isRead = isChatOpenForThisPeer
+
+                    val dao = DbProvider.db.chatDao()
+
+                    val exists = dao.getMessageById(messageId)
+
+                    if (exists == null) {
+
+                        dao.insert(
+                            ChatEntity(
+                                messageId = messageId,
+                                myIdentity = myIdentity,
+                                peerIdentity = peer,
+                                fromIdentity = peer,
+                                originalText = text,
+                                timestamp = System.currentTimeMillis(),
+                                isRead = isChatOpenForThisPeer,
+                                status = "DELIVERED"
+                            )
                         )
-                    )
+
+                    }
+
+                    // 🔥 If chat is open, send READ immediately
+                    if (isChatOpenForThisPeer) {
+
+                        val readIntent = Intent("ACTION_MESSAGE_READ").apply {
+                            putExtra("messageId", "ALL")
+                            `package` = packageName
+                        }
+
+                        sendBroadcast(readIntent)
+
+                        notifyReadToServer(peer)
+                    }
+
+                    // 🔥 Notify sender phone that message reached device
+                    val deliveredIntent = Intent("ACTION_MESSAGE_DELIVERED").apply {
+                        putExtra("messageId", messageId)
+                        `package` = packageName
+                    }
+                    sendBroadcast(deliveredIntent)
+                    notifyDeliveredToServer(messageId)
+
                     val refresh = Intent(ChatActions.ACTION_REFRESH_CHATLIST).apply {
                         `package` = packageName
                     }
                     sendBroadcast(refresh)
-
                 }
 
 
@@ -181,7 +259,8 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
                 // 🔔 still broadcast (for live case)
                 val i = Intent(ChatActivity.ACTION_CHAT_MESSAGE).apply {
                     putExtra("from", data["sender"])
-                    putExtra("original", data["original"])
+                    putExtra("original", text) // already decrypted
+                    putExtra("messageId", messageId)
                     `package` = packageName
                 }
                 sendBroadcast(i)
@@ -189,10 +268,71 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
             }
 
 
+            "MESSAGE_DELIVERED" -> {
+
+                val messageId = data["messageId"] ?: return
+
+                val intent = Intent("ACTION_MESSAGE_DELIVERED").apply {
+                    putExtra("messageId", messageId)
+                    `package` = packageName
+                }
+
+                sendBroadcast(intent)
+            }
+
+            "MESSAGE_READ" -> {
+
+                val messageId = data["messageId"] ?: "ALL"
+
+                val intent = Intent("ACTION_MESSAGE_READ").apply {
+                    putExtra("messageId", messageId)
+                    `package` = packageName
+                }
+
+                sendBroadcast(intent)
+            }
+
+            "LIVE_CAPTION" -> {
+
+                val i = Intent("ACTION_LIVE_CAPTION").apply {
+                    putExtra("from", data["sender"])
+                    putExtra("original", data["original"])
+                    putExtra("translated", data["translated"])
+                    putExtra("english", data["english"])   // 🔥 ADD THIS LINE
+                    `package` = packageName
+                }
+
+                sendBroadcast(i)
+            }
+
+
+
             else -> {
                 Log.d("FCM", "ℹ️ Ignored unsupported/other FCM type: ${data["type"]}")
             }
         }
+    }
+
+
+    private fun notifyDeliveredToServer(messageId: String) {
+
+        val json = JSONObject().apply {
+            put("messageId", messageId)
+        }
+
+        val body = json.toString()
+            .toRequestBody("application/json".toMediaType())
+
+        val req = Request.Builder()
+            .url("$BASE_URL/chat/delivered")
+            .post(body)
+            .build()
+
+        OkHttpClient().newCall(req).enqueue(object: Callback {
+            override fun onFailure(call: Call, e: IOException) {}
+
+            override fun onResponse(call: Call, response: Response) {}
+        })
     }
 
 
@@ -232,6 +372,7 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
     private fun showIncomingActivity(kind: String, from: String, room: String?) {
         val isForeground = AppVisibility.isForeground(this)
 
+
         // -------------------- ALWAYS show notification --------------------
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channelId = "incoming_call_channel"
@@ -241,7 +382,13 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
                 channelId,
                 "Incoming Calls",
                 NotificationManager.IMPORTANCE_HIGH
-            )
+            ).apply {
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                enableVibration(true)
+                enableLights(true)
+                setBypassDnd(true)   // 🔥 IMPORTANT
+            }
+
             nm.createNotificationChannel(ch)
         }
 
@@ -258,35 +405,74 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val rejectIntent = Intent(this, CallActionReceiver::class.java).apply {
+            action = CallNotificationService.ACTION_REJECT
+            putExtra("caller", from)
+        }
+
         val rejectPI = PendingIntent.getBroadcast(
-            this, 2002,
-            Intent(CallNotificationService.ACTION_REJECT).apply { `package` = packageName },
+            this,
+            2002,
+            rejectIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val acceptPI = PendingIntent.getBroadcast(
-            this, 2003,
-            Intent(CallNotificationService.ACTION_ACCEPT).apply { `package` = packageName },
+        val acceptIntent = Intent(this, CallScreenActivity::class.java).apply {
+            action = "ACTION_ACCEPT_FROM_NOTIFICATION"
+            putExtra("call_mode", CallMode.PSTN_AUDIO.name)
+            putExtra("display_name", from)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+
+        val acceptPendingIntent = PendingIntent.getActivity(
+            this,
+            1001,
+            acceptIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val contactName = PhoneUtils.getContactName(this, from)
 
+        val displayText =
+            if (contactName != null)
+                "$contactName\n${PhoneUtils.formatInternational(from)}"
+            else
+                PhoneUtils.formatInternational(from)
 
         val notification = NotificationCompat.Builder(this, channelId)
             .setSmallIcon(R.drawable.call_img)
             .setContentTitle(if (kind == "VIDEO") "Incoming Video Call" else "Incoming Voice Call")
-            .setContentText(from)
-            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setContentText(displayText)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setAutoCancel(false)
-            .setOngoing(true)
-            .setFullScreenIntent(openPendingIntent, false)
+            .setOngoing(false)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setFullScreenIntent(openPendingIntent, true)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Reject", rejectPI)
-            .addAction(android.R.drawable.ic_menu_call, "Answer", acceptPI)
+            .addAction(android.R.drawable.ic_menu_call, "Accept", acceptPendingIntent)
             .setContentIntent(openPendingIntent)   // <--- clicking anywhere opens UI
             .build()
 
         nm.notify(9999, notification)
+
+
+// 🔥 Start ringtone service safely
+        try {
+            val ringIntent = Intent(this, IncomingCallService::class.java).apply {
+                putExtra("from", from)
+                putExtra("kind", kind == "VIDEO")
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(ringIntent)
+            } else {
+                startService(ringIntent)
+            }
+
+        } catch (e: Exception) {
+            Log.e("FCM", "Failed to start IncomingCallService: ${e.message}")
+        }
 
         // -------------------- OPEN UI ONLY IF APP IS FOREGROUND --------------------
         if (isForeground) {
@@ -296,6 +482,103 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
 
 
 
+    private fun showChatNotification(peer: String, message: String) {
 
+        val name = PhoneUtils.getDisplayName(this, peer)
+
+        val messages = chatNotificationStore.getOrPut(peer) { mutableListOf() }
+
+        messages.add(message)
+
+        val intent = Intent(this, ChatActivity::class.java).apply {
+            putExtra("peer_identity", peer)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            peer.hashCode(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val messagingStyle = NotificationCompat.MessagingStyle(name)
+
+        // show only last 5 messages
+        messages.takeLast(5).forEach {
+
+            val trimmed =
+                if (it.length > 80)
+                    it.substring(0, 80) + "…"
+                else
+                    it
+
+            messagingStyle.addMessage(trimmed, System.currentTimeMillis(), name)
+        }
+
+        val notification = NotificationCompat.Builder(this, CHAT_CHANNEL_ID)
+            .setSmallIcon(R.drawable.chat_img)
+            .setStyle(messagingStyle)
+            .setContentTitle("$name (${messages.size} messages)")
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .setGroup(CHAT_GROUP)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .build()
+
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        nm.notify(peer.hashCode(), notification)
+        showChatSummaryNotification()
+    }
+
+    private fun showChatSummaryNotification() {
+
+        val totalChats = chatNotificationStore.size
+
+        val summary = NotificationCompat.Builder(this, CHAT_CHANNEL_ID)
+            .setSmallIcon(R.drawable.chat_img)
+            .setContentTitle("$totalChats chats")
+            .setContentText("New messages")
+            .setGroup(CHAT_GROUP)
+            .setGroupSummary(true)
+            .setAutoCancel(true)
+            .build()
+
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+        nm.notify(0, summary)
+    }
+
+
+    private fun notifyReadToServer(peer: String) {
+
+        val prefs = getSharedPreferences("app_prefs", MODE_PRIVATE)
+
+        val myIdentity = PhoneUtils.normalizeIdentity(
+            prefs.getString("identity", "")!!
+        )
+
+        val json = JSONObject().apply {
+            put("reader", myIdentity)
+            put("peer", peer)
+        }
+
+        val body = json.toString()
+            .toRequestBody("application/json".toMediaType())
+
+        val req = Request.Builder()
+            .url("$BASE_URL/chat/read")
+            .post(body)
+            .build()
+
+        OkHttpClient().newCall(req).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {}
+
+            override fun onResponse(call: Call, response: Response) {}
+        })
+    }
 
 }

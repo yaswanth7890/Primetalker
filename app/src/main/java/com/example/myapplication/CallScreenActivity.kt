@@ -3,6 +3,7 @@ package com.example.myapplication
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.ActivityManager
+import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -17,12 +18,13 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.View
-import android.widget.ArrayAdapter
+
 import android.widget.FrameLayout
 import android.widget.ImageButton
-import android.widget.Spinner
+
 import android.widget.TextView
 import android.widget.Toast
+import android.widget.ToggleButton
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -36,7 +38,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
-import android.widget.AdapterView
+
 
 import android.content.Context.RECEIVER_NOT_EXPORTED
 import android.content.Context.RECEIVER_EXPORTED
@@ -45,6 +47,7 @@ import android.util.Base64
 import java.io.File
 import android.media.MediaPlayer
 import android.os.Build
+import androidx.recyclerview.widget.LinearLayoutManager
 
 
 private lateinit var audioManager: AudioManager
@@ -64,9 +67,10 @@ class CallScreenActivity : AppCompatActivity() {
     private lateinit var remoteContainer: FrameLayout
     private lateinit var localContainer: FrameLayout
 
-    private lateinit var spinnerTargetLang: Spinner
+    private lateinit var recyclerCaptions: androidx.recyclerview.widget.RecyclerView
+    private lateinit var captionAdapter: LiveCaptionAdapter
+    private val captionList = mutableListOf<LiveCaption>()
 
-    private lateinit var spinnerSpeakLang: Spinner
 
 
     // Twilio Video Views (created at runtime)
@@ -78,13 +82,17 @@ class CallScreenActivity : AppCompatActivity() {
 
     // Voice (Twilio Voice SDK)
     private var voiceCall: VoiceCall? = null
-    private var muted = false
+
 
     // Video
     private var room: Room? = null
     private var localAudio: LocalAudioTrack? = null
     private var localVideo: LocalVideoTrack? = null
     private var videoCapturer: VideoCapturer? = null
+
+
+    private lateinit var toggleCaptions: ToggleButton
+    private var captionsEnabled = true
 
     // Timer / notification sync
     private var timer: CountDownTimer? = null
@@ -145,6 +153,7 @@ class CallScreenActivity : AppCompatActivity() {
     // Twilio Video listeners
     private val roomListener = object : Room.Listener {
         override fun onConnected(room: Room) {
+
             runOnUiThread {
                 Log.d(TAG, "Video room connected")
                 txtCallTimer.text = "Ringing…"
@@ -232,47 +241,61 @@ class CallScreenActivity : AppCompatActivity() {
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onCreate(savedInstanceState: Bundle?) {
+
+        try {
+            stopService(Intent(this, IncomingCallService::class.java))
+        } catch (_: Exception) {}
+
         super.onCreate(savedInstanceState)
         isActive = true
         setContentView(R.layout.activity_call_screen)
 
+
+        if (intent?.action == "ACTION_ACCEPT_FROM_NOTIFICATION") {
+            acceptInviteDirectly()
+        }
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
 
         bindViews()
-        setupSpinners()
+        restoreCaptions()
 
-        // Apply incoming extras
-        txtCallerName.text = intent.getStringExtra("display_name") ?: CallHolder.callerDisplayName ?: "Unknown"
+// 🔥 Restore timer from service if call already running
+        if (CallHolder.activeCall != null) {
+            elapsed = CallNotificationService.globalSeconds
+            txtCallTimer.text = String.format("%02d:%02d", elapsed / 60, elapsed % 60)
+        }
+        val rawNumber =
+            intent.getStringExtra("display_name")
+                ?: CallHolder.callerDisplayName
+                ?: "Unknown"
+
+        val contactName = PhoneUtils.getContactName(this, rawNumber)
+
+        txtCallerName.text =
+            if (contactName != null)
+                "$contactName\n${PhoneUtils.formatInternational(rawNumber)}"
+            else
+                PhoneUtils.formatInternational(rawNumber)
         mode = CallMode.valueOf(intent.getStringExtra("call_mode") ?: CallMode.PSTN_AUDIO.name)
 
         btnEndCall.setOnClickListener { finishCallGracefully() }
 
         btnSpeaker.setOnClickListener { toggleSpeaker() }
+        btnMute.setOnClickListener { toggleMute() }
         btnUpgradeToVideo.setOnClickListener { toggleVideo() }
+
+
 
         // Register receivers (safe registration)
 
-        try {
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                registerReceiver(
-                    endCallReceiver,
-                    IntentFilter("ACTION_FORCE_END_CALL"),
-                    RECEIVER_NOT_EXPORTED
-                )
-                registerReceiver(
-                    calleeAnsweredReceiver,
-                    IntentFilter("ACTION_CALLEE_ANSWERED"),
-                    RECEIVER_NOT_EXPORTED
-                )
-            } else {
-                registerReceiver(endCallReceiver, IntentFilter("ACTION_FORCE_END_CALL"))
-                registerReceiver(calleeAnsweredReceiver, IntentFilter("ACTION_CALLEE_ANSWERED"))
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Receiver registration failed: ${e.message}")
-        }
 
+
+        registerSafeReceiver(uiSyncReceiver, CallNotificationService.ACTION_SYNC_UI)
+
+        registerSafeReceiver(endCallReceiver, "ACTION_FORCE_END_CALL")
+        registerSafeReceiver(calleeAnsweredReceiver, "ACTION_CALLEE_ANSWERED")
+        registerSafeReceiver(captionReceiver, "ACTION_LIVE_CAPTION")
 
 
 
@@ -299,6 +322,72 @@ class CallScreenActivity : AppCompatActivity() {
     }
 
 
+    private fun restoreCaptions() {
+
+        captionList.clear()
+
+        captionList.addAll(CallHolder.captionHistory)
+
+        captionAdapter.notifyDataSetChanged()
+
+        if (captionList.isNotEmpty()) {
+            recyclerCaptions.scrollToPosition(captionList.size - 1)
+        }
+    }
+    private fun acceptInviteDirectly() {
+
+        val invite = IncomingCallHolder.invite
+            ?: return
+// HARD STOP ALL RING + VIBRATION
+        try {
+            stopService(Intent(this, IncomingCallService::class.java))
+        } catch (_: Exception) {}
+
+        try {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.cancel(CallNotificationService.INCOMING_CALL_NOTIFICATION_ID)
+        } catch (_: Exception) {}
+
+        // Force cancel notification channel vibration
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.getNotificationChannel("incoming_call_channel")?.let {
+                it.enableVibration(false)
+                nm.createNotificationChannel(it)
+            }
+        }
+
+        invite.accept(this, object : com.twilio.voice.Call.Listener {
+
+            override fun onConnected(call: com.twilio.voice.Call) {
+                CallHolder.activeCall = call
+                IncomingCallHolder.invite = null
+                startTimerIfNeeded()
+
+            }
+
+            override fun onConnectFailure(call: com.twilio.voice.Call, e: com.twilio.voice.CallException) {
+                finish()
+            }
+
+            override fun onDisconnected(call: com.twilio.voice.Call, e: com.twilio.voice.CallException?) {
+                finish()
+            }
+
+            override fun onReconnecting(call: com.twilio.voice.Call, e: com.twilio.voice.CallException) {}
+            override fun onReconnected(call: com.twilio.voice.Call) {}
+            override fun onRinging(call: com.twilio.voice.Call) {}
+        })
+    }
+
+
+    private fun registerSafeReceiver(receiver: BroadcastReceiver, action: String) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, IntentFilter(action), RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(receiver, IntentFilter(action))
+        }
+    }
 
 
 
@@ -312,98 +401,89 @@ class CallScreenActivity : AppCompatActivity() {
         remoteContainer = findViewById(R.id.remoteVideoContainer)
         localContainer = findViewById(R.id.localVideoContainer)
 
-        spinnerTargetLang = findViewById(R.id.spinnerTargetLang)
-        spinnerSpeakLang = findViewById(R.id.spinnerSourceLang)
+        recyclerCaptions = findViewById(R.id.recyclerCaptions)
+        captionAdapter = LiveCaptionAdapter(captionList)
+        recyclerCaptions.layoutManager = LinearLayoutManager(this).apply {
+            stackFromEnd = true
+        }
+
+        recyclerCaptions.adapter = captionAdapter
+
 
         remoteVideoView = VideoView(this)
         localVideoView = VideoView(this)
         remoteContainer.addView(remoteVideoView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         localContainer.addView(localVideoView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
-    }
-
-    private fun setupSpinners() {
-        val langs = arrayOf("English", "Spanish", "French", "German", "Hindi")
-        val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, langs)
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-
-        spinnerTargetLang.adapter = adapter
-        spinnerTargetLang.setSelection(1)
-
-        val speakLangs = arrayOf(
-            "English",
-            "Hindi",
-            "Telugu",
-            "Tamil",
-            "Kannada",
-            "French",
-            "German",
-            "Spanish"
-        )
-
-        val speakAdapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_item,
-            speakLangs
-        )
-        speakAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-
-        spinnerSpeakLang.adapter = speakAdapter
-        spinnerSpeakLang.setSelection(0) // default English
+        updateMuteIcon()
+        updateSpeakerIcon()
 
 
+        toggleCaptions = findViewById(R.id.toggleCaptions)
 
-        spinnerTargetLang.onItemSelectedListener =
-            object : AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(
-                    parent: AdapterView<*>,
-                    view: View?,
-                    position: Int,
-                    id: Long
-                ) {
-                    val selected = spinnerTargetLang.selectedItem.toString()
-                    val langCode = mapLangToCode(selected)
-                    sendTargetLangToServer(langCode)
-                }
+        toggleCaptions.setOnCheckedChangeListener { _, isChecked ->
+            captionsEnabled = isChecked
 
-                override fun onNothingSelected(parent: AdapterView<*>) {}
+            if (!isChecked) {
+
+                recyclerCaptions.visibility = View.GONE
+
+            } else {
+
+                recyclerCaptions.visibility = View.VISIBLE
+                restoreCaptions()
+
             }
+        }
 
     }
+
+
 
 
 
     // PSTN (Twilio Voice)
     private fun setupForPstnAudio() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED) {
+
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.RECORD_AUDIO),
+                REQ_PERMS
+            )
+            return
+        }
         showVideo(false)
         txtCallTimer.text = "Ringing…"
         voiceCall = CallHolder.activeCall
         Log.d(TAG, "ActiveCall state: ${voiceCall?.state}")
 
+        voiceCall = CallHolder.activeCall
+
         if (voiceCall == null) {
-            Toast.makeText(this, "No active call", Toast.LENGTH_SHORT).show()
-            finish()
+            txtCallTimer.text = "Connecting..."
             return
         }
 
-        val selectedSpeakLang = mapLangToCode(
-            spinnerSpeakLang.selectedItem.toString()
-        )
-        sendSpeakingLangToServer(selectedSpeakLang)
-
-        spinnerSpeakLang.isEnabled = false
-
 
         attachVoiceListener(voiceCall!!, object : VoiceCall.Listener {
+
             override fun onRinging(call: VoiceCall) {
                 runOnUiThread { txtCallTimer.text = "Ringing…" }
             }
 
             override fun onConnected(call: VoiceCall) {
+                CallHolder.isSpeakerOn = false
+                CallHolder.isMuted = false
+                setAudioMode(true)
+                val intent = Intent(CallNotificationService.ACTION_SYNC_UI)
+                intent.setPackage(packageName)
+                sendBroadcast(intent)
                 Log.d(TAG, "✅ Voice call connected")
 
                 // 🔥 HARD MUTE — BOTH SDK + SYSTEM
                 try {
-                    voiceCall?.mute(true)   // SDK-level mute
+
                     Log.d("CallScreen", "🔇 Mic fully disabled")
                 } catch (e: Exception) {
                     Log.e("CallScreen", "Mic mute failed", e)
@@ -419,9 +499,7 @@ class CallScreenActivity : AppCompatActivity() {
                         if (answered) {
                             startTimerIfNeeded()
 
-                            val selectedTarget = spinnerTargetLang.selectedItem.toString()
-                            val targetLang = mapLangToCode(selectedTarget)
-                            sendTargetLangToServer(targetLang)
+
                         }
                     }
                 }
@@ -468,65 +546,7 @@ class CallScreenActivity : AppCompatActivity() {
     }
 
 
-    private fun sendSpeakingLangToServer(lang: String) {
-        val identity = prefs.getString("identity", "")!!
-            .replace("[^0-9]".toRegex(), "")
 
-        val json = JSONObject().apply {
-            put("speakerIdentity", identity)
-            put("speakLang", lang)
-        }
-
-        val body = json.toString()
-            .toRequestBody("application/json".toMediaType())
-
-        val req = Request.Builder()
-            .url("$BACKEND_BASE_URL/set-speaking-lang")
-            .post(body)
-            .build()
-
-        OkHttpClient().newCall(req).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                Log.e("SpeakLang", "❌ Failed: ${e.message}")
-            }
-
-            override fun onResponse(call: Call, response: Response) {
-                response.close()
-                Log.d("SpeakLang", "✅ Speaking language sent: $lang")
-            }
-        })
-    }
-
-
-    private fun sendTargetLangToServer(target: String) {
-        val prefs = getSharedPreferences("app_prefs", MODE_PRIVATE)
-        val from = prefs.getString("identity", "")!!.replace("[^0-9]".toRegex(), "")
-        val to   = intent.getStringExtra("to_identity")?.replace("[^0-9]".toRegex(), "") ?: ""
-
-        val json = JSONObject().apply {
-            put("listenerIdentity", from) // KEEP
-            // listenerIdentity = THIS device (who will hear translated audio)
-
-            put("listenLang", target)
-        }
-
-
-        val body = json.toString().toRequestBody("application/json".toMediaType())
-        val req  = Request.Builder()
-            .url("$BACKEND_BASE_URL/set-lang")
-            .post(body)
-            .build()
-
-        OkHttpClient().newCall(req).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                Log.e("LangUpdate", e.message ?: "")
-            }
-
-            override fun onResponse(call: Call, resp: Response) {
-                resp.close()
-            }
-        })
-    }
 
     // Video
     private fun setupForAppVideo() {
@@ -603,24 +623,36 @@ class CallScreenActivity : AppCompatActivity() {
     // Timer & notification sync
     private fun startTimerIfNeeded() {
         if (timer != null) return
-        txtCallTimer.text = "00:00"
-        startTimer()
-        setAudioMode(true)
 
-        CallNotificationService.startOngoing(this, txtCallerName.text.toString(), mode == CallMode.APP_VIDEO)
+        // 🔥 DO NOT RESET IF ALREADY COUNTING
+        if (elapsed == 0L) {
+            txtCallTimer.text = "00:00"
+        } else {
+            txtCallTimer.text = String.format("%02d:%02d", elapsed / 60, elapsed % 60)
+        }
+
+        startTimer()
+
+        setAudioMode(true)
+        updateSpeakerIcon()
+
+        CallNotificationService.startOngoing(
+            this,
+            txtCallerName.text.toString(),
+            mode == CallMode.APP_VIDEO
+        )
     }
 
 
     private fun startTimer() {
         if (timer != null) return
-        elapsed = 0L
+
         timer?.cancel()
         timer = object : CountDownTimer(Long.MAX_VALUE, 1000) {
             override fun onTick(ms: Long) {
                 elapsed++
                 txtCallTimer.text = String.format("%02d:%02d", elapsed / 60, elapsed % 60)
 
-                // Sync every 2-3 seconds to keep service in sync (less frequent reduces overhead)
                 if (elapsed % 3L == 0L) {
                     val syncIntent = Intent(this@CallScreenActivity, CallNotificationService::class.java).apply {
                         action = "com.example.myapplication.ACTION_SYNC_SECONDS"
@@ -628,33 +660,16 @@ class CallScreenActivity : AppCompatActivity() {
                         putExtra("caller", txtCallerName.text.toString())
                         putExtra("isVideo", mode == CallMode.APP_VIDEO)
                     }
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
                         startForegroundService(syncIntent)
-                    } else {
+                    else
                         startService(syncIntent)
-                    }
                 }
             }
 
             override fun onFinish() {}
         }.start()
-
-        // Ensure the notification service starts as foreground
-        try {
-            val i = Intent(this, CallNotificationService::class.java).apply {
-                action = "com.example.myapplication.ACTION_SYNC_SECONDS"
-                putExtra("elapsed", elapsed)
-                putExtra("caller", txtCallerName.text.toString())
-                putExtra("isVideo", mode == CallMode.APP_VIDEO)
-            }
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                startForegroundService(i)
-            } else {
-                startService(i)
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to start/sync CallNotificationService: ${e.message}")
-        }
     }
 
     private fun stopTimer() {
@@ -666,21 +681,100 @@ class CallScreenActivity : AppCompatActivity() {
         runOnUiThread {
             if (!::txtCallTimer.isInitialized) return@runOnUiThread
             if (timer == null) {
-                txtCallTimer.text = "00:00"
+
+                // 🔥 Restore from service BEFORE starting timer
+                elapsed = CallNotificationService.globalSeconds
+
+                txtCallTimer.text =
+                    String.format("%02d:%02d", elapsed / 60, elapsed % 60)
+
                 startTimer()
             }
         }
     }
 
+
+
     // UI controls
-
-
+    private val uiSyncReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            updateMuteIcon()
+            updateSpeakerIcon()
+        }
+    }
+    private fun updateSpeakerIcon() {
+        if (CallHolder.isSpeakerOn) {
+            btnSpeaker.setImageResource(android.R.drawable.ic_lock_silent_mode_off)
+        } else {
+            btnSpeaker.setImageResource(android.R.drawable.ic_lock_silent_mode)
+        }
+    }
 
     private fun toggleSpeaker() {
+
         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         am.mode = AudioManager.MODE_IN_COMMUNICATION
-        am.isSpeakerphoneOn = !am.isSpeakerphoneOn
+
+        CallHolder.isSpeakerOn = !CallHolder.isSpeakerOn
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+
+            val speakerDevice = am.availableCommunicationDevices.firstOrNull {
+                it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+            }
+
+            if (CallHolder.isSpeakerOn && speakerDevice != null) {
+                am.setCommunicationDevice(speakerDevice)
+            } else {
+                val earpiece = am.availableCommunicationDevices.firstOrNull {
+                    it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                }
+
+                if (earpiece != null) {
+                    am.setCommunicationDevice(earpiece)
+                } else {
+                    am.clearCommunicationDevice()
+                }
+            }
+
+        } else {
+            am.isSpeakerphoneOn = CallHolder.isSpeakerOn
+        }
+
+        updateSpeakerIcon()
+        val intent = Intent(CallNotificationService.ACTION_SYNC_UI)
+        intent.setPackage(packageName)
+        sendBroadcast(intent)
+
     }
+
+
+    private fun toggleMute() {
+
+        CallHolder.isMuted = !CallHolder.isMuted
+
+        try {
+            voiceCall?.mute(CallHolder.isMuted)
+        } catch (e: Exception) {
+            Log.e(TAG, "Mute failed: ${e.message}")
+        }
+
+        updateMuteIcon()
+        val intent = Intent(CallNotificationService.ACTION_SYNC_UI)
+        intent.setPackage(packageName)
+        sendBroadcast(intent)
+    }
+
+
+    private fun updateMuteIcon() {
+        if (CallHolder.isMuted) {
+            btnMute.setImageResource(R.drawable.ic_mic_off)
+        } else {
+            btnMute.setImageResource(R.drawable.ic_mic_on)
+        }
+    }
+
+
 
     private fun toggleVideo() {
         // If no video tracks yet -> enable camera and publish
@@ -725,13 +819,30 @@ class CallScreenActivity : AppCompatActivity() {
 
     private fun setAudioMode(inCall: Boolean) {
         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        am.mode = if (inCall) AudioManager.MODE_IN_COMMUNICATION else AudioManager.MODE_NORMAL
 
         if (inCall) {
+            am.mode = AudioManager.MODE_IN_COMMUNICATION
 
-        } else {
+            CallHolder.isSpeakerOn = false
+            CallHolder.isMuted = false
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+
+                val earpiece = am.availableCommunicationDevices.firstOrNull {
+                    it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                }
+
+                if (earpiece != null) {
+                    am.setCommunicationDevice(earpiece)
+                } else {
+                    am.clearCommunicationDevice()
+                }
+
+            } else {
+                am.isSpeakerphoneOn = false
+            }
+
             am.isMicrophoneMute = false
-            am.isSpeakerphoneOn = false
         }
     }
 
@@ -763,17 +874,75 @@ class CallScreenActivity : AppCompatActivity() {
         }
     }
 
-    private fun mapLangToCode(lang: String): String {
-        return when (lang) {
-            "English" -> "en"
-            "Hindi"   -> "hi"
-            "Telugu"  -> "te"
-            "Tamil"   -> "ta"
-            "Kannada" -> "kn"
-            "French"  -> "fr"
-            "German"  -> "de"
-            "Spanish" -> "es"
-            else -> "en"
+
+    private val captionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (!captionsEnabled) return
+            val original = intent?.getStringExtra("original") ?: ""
+            val translated = intent?.getStringExtra("translated") ?: ""
+            val english = intent?.getStringExtra("english") ?: ""
+            val from = intent?.getStringExtra("from") ?: return
+
+            val myId = prefs.getString("identity", "")!!
+                .replace("\\D".toRegex(), "")
+
+            val isMine = from == myId
+
+// ---------- SMART DISPLAY LOGIC ----------
+            val textBuilder = StringBuilder()
+
+            if (isMine) {
+
+                // 🔵 RIGHT SIDE (What I speak)
+                textBuilder.append(original)
+
+                // Add English only if different
+                if (english.isNotBlank() &&
+                    english != original) {
+                    textBuilder.append("\n").append(english)
+                }
+
+            } else {
+
+                // 🔴 LEFT SIDE (Other person speaks)
+                textBuilder.append(original)
+
+                // Add translated (my language)
+                if (translated.isNotBlank() &&
+                    translated != original) {
+                    textBuilder.append("\n").append(translated)
+                }
+
+                // Add English if different from both
+                if (english.isNotBlank() &&
+                    english != original &&
+                    english != translated) {
+                    textBuilder.append("\n").append(english)
+                }
+            }
+
+            val caption = LiveCaption(
+                from = from,
+                original = textBuilder.toString(),
+                translated = "",
+                isMine = isMine
+            )
+            runOnUiThread {
+                CallHolder.captionHistory.add(caption)
+
+                if (CallHolder.captionHistory.size > 200) {
+                    CallHolder.captionHistory.removeAt(0)
+                }
+                captionList.add(caption)
+
+                // limit to last 100 messages
+                if (captionList.size > 100) {
+                    captionList.removeAt(0)
+                }
+
+                captionAdapter.notifyItemInserted(captionList.size - 1)
+                recyclerCaptions.scrollToPosition(captionList.size - 1)
+            }
         }
     }
 
@@ -802,11 +971,12 @@ class CallScreenActivity : AppCompatActivity() {
             try { localAudio?.release() } catch (_: Exception) {}
             localVideo = null; localAudio = null
 
+            // Notify backend END_CALL
+            notifyBackendEndCallSafely()
             CallHolder.isOutgoing = false
             isActive = false
 
-            // Notify backend END_CALL
-            notifyBackendEndCallSafely()
+
 
         } catch (e: Exception) {
             Log.e(TAG, "finishCallGracefully error: ${e.message}")
@@ -816,6 +986,19 @@ class CallScreenActivity : AppCompatActivity() {
                 CallNotificationService.stopService(this@CallScreenActivity)
                 stopTimer()
                 setAudioMode(false)
+                CallHolder.isMuted = false
+                CallHolder.isSpeakerOn = false
+                if (isTaskRoot) {
+                    val intent = Intent(this@CallScreenActivity, MainActivity::class.java)
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                    startActivity(intent)
+                }
+                CallHolder.captionHistory.clear()
+                captionList.clear()
+
+                // 🔥 RESET TIMER FOR NEXT CALL
+                elapsed = 0L
+                CallNotificationService.globalSeconds = 0L
                 finish()
                 stopService(Intent(this, CallForegroundService::class.java))
 
@@ -823,7 +1006,13 @@ class CallScreenActivity : AppCompatActivity() {
         }
     }
 
+
+    override fun onBackPressed() {
+        super.onBackPressed()
+        moveTaskToBack(true)
+    }
     private fun notifyBackendEndCallSafely() {
+
         try {
             val stored = prefs.getString("identity", "") ?: ""
             val fromDigits = stored.replace("[^0-9]".toRegex(), "")
@@ -882,16 +1071,19 @@ class CallScreenActivity : AppCompatActivity() {
         }
     }
 
+
+
     override fun onDestroy() {
 
 
         super.onDestroy()
         try { unregisterReceiver(endCallReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(calleeAnsweredReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(captionReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(uiSyncReceiver) } catch (_: Exception) {}
         isActive = false
         CallHolder.isOutgoing = false
-        try { CallHolder.activeCall?.disconnect() } catch (_: Exception) {}
-        try { room?.disconnect() } catch (_: Exception) {}
+
         stopTimer()
         setAudioMode(false)
 
@@ -902,14 +1094,5 @@ class CallScreenActivity : AppCompatActivity() {
 
     // small constant(s)
     private val TAG = "CallScreen"
-
-
-
-    private fun showTranslatedText(text: String) {
-        try { findViewById<TextView>(R.id.txtCaptions)?.text = text }
-        catch (_: Exception) {}
-    }
-
-
 
 }

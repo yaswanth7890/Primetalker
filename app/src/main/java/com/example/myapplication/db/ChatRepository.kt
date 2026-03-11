@@ -13,12 +13,18 @@ class ChatRepository(context: Context) {
         from: String,
         text: String
     ) {
+
+        val messageId = java.util.UUID.randomUUID().toString()
+
         dao.insert(
             ChatEntity(
+                messageId = messageId,
                 myIdentity = me,
                 peerIdentity = peer,
                 fromIdentity = from,
-                originalText = text
+                originalText = text,
+                status = "PENDING",
+                isRead = false
             )
         )
     }

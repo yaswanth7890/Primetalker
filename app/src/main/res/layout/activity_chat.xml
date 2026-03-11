@@ -23,7 +23,7 @@
             android:textSize="18sp"
             android:textStyle="bold"
             android:textColor="@android:color/white"
-            android:maxLines="1"
+            android:maxLines="2"
             android:ellipsize="end"/>
 
         <Spinner
@@ -33,6 +33,19 @@
             android:layout_alignParentEnd="true"
             android:layout_centerVertical="true"
             android:paddingEnd="4dp"/>
+
+        <ImageButton
+            android:id="@+id/btnTtsToggle"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:layout_centerVertical="true"
+            android:layout_toStartOf="@id/spinnerTarget"
+            android:layout_marginEnd="8dp"
+            android:src="@android:drawable/ic_lock_silent_mode_off"
+            android:background="@null"
+            android:contentDescription="Toggle TTS"/>
+
+
     </RelativeLayout>
 
 

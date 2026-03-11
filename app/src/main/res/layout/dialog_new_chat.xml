@@ -1,0 +1,22 @@
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:orientation="vertical"
+    android:padding="16dp"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content">
+
+    <EditText
+        android:id="@+id/etSearch"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Search name or enter number"
+        android:padding="12dp"
+        android:background="@android:drawable/edit_text"/>
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/recyclerContacts"
+        android:layout_width="match_parent"
+        android:layout_height="300dp"
+        android:layout_marginTop="10dp"/>
+
+</LinearLayout>

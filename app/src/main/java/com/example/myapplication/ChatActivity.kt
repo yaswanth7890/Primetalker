@@ -27,7 +27,14 @@ import com.example.myapplication.db.ChatEntity
 import kotlinx.coroutines.launch
 import com.example.myapplication.db.DbProvider
 import com.google.mlkit.nl.languageid.LanguageIdentification
-
+import android.media.MediaPlayer
+import android.util.Base64
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import java.io.File
+import java.util.UUID
+import androidx.work.*
+import java.util.concurrent.TimeUnit
 
 
 class ChatActivity : AppCompatActivity() {
@@ -50,7 +57,7 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var tvMicLang: TextView
 
 
-
+    private var isTtsEnabled = true
 
     private lateinit var speechRecognizer: android.speech.SpeechRecognizer
     private lateinit var speechIntent: Intent
@@ -63,6 +70,7 @@ class ChatActivity : AppCompatActivity() {
 
 
     data class ChatMessage(
+        val messageId: String,
         val from: String,
         val original: String,
         val container: LinearLayout,
@@ -71,8 +79,8 @@ class ChatActivity : AppCompatActivity() {
         var englishText: String? = null,
         var targetTranslations: MutableMap<String, String> = mutableMapOf(),
         var originalLang: String? = null,
-        var dbId: Long? = null
-
+        var dbId: Long? = null,
+        var statusView: TextView? = null
 
     )
 
@@ -183,16 +191,31 @@ class ChatActivity : AppCompatActivity() {
 
         setupDock()
         val prefs = getSharedPreferences("app_prefs", MODE_PRIVATE)
-        myIdentity = prefs.getString("identity", "")?.replace("\\D".toRegex(), "") ?: ""
+        myIdentity = PhoneUtils.normalizeIdentity(
+            prefs.getString("identity", "") ?: ""
+        )
 
 
 
 
         receiverIdentity = intent.getStringExtra("peer_identity")
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+        receiverIdentity?.let {
+            nm.cancel(it.hashCode())
+        }
         val tvTitle = findViewById<TextView>(R.id.tvTitle)
 
         receiverIdentity?.let {
-            tvTitle.text = formatPhoneNumber(it)
+
+            val name = PhoneUtils.getDisplayName(this, it)
+
+            val number = PhoneUtils.formatInternational(it)
+
+            if (name == number) {
+                tvTitle.text = number
+            } else {
+                tvTitle.text = "$name\n$number"
+            }
         }
 
 
@@ -269,7 +292,7 @@ class ChatActivity : AppCompatActivity() {
 
         // -------- Send Message --------
         findViewById<ImageButton>(R.id.btnSend).setOnClickListener {
-        val text = inputMessage.text.toString().trim()
+            val text = inputMessage.text.toString().trim()
             if (receiverIdentity == null) {
                 Toast.makeText(this, "Select a user first", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
@@ -277,7 +300,10 @@ class ChatActivity : AppCompatActivity() {
 
             if (text.isNotEmpty()) {
 
-                val msg = createSenderMessage(text)
+                val messageId = UUID.randomUUID().toString()
+
+                val msg = createSenderMessage(messageId, text)
+                updateMessageStatus(msg, "PENDING")
                 receivedMessages.add(msg)
                 detectOriginalLanguage(msg)
 
@@ -287,30 +313,79 @@ class ChatActivity : AppCompatActivity() {
                     msg.englishView.text = translated
                     applyReceiverVisibility()
                 }
-                sendToBackend(text)
+
+
+                sendToBackend(messageId, text)
+
 
                 lifecycleScope.launch {
                     DbProvider.db.chatDao().insert(
                         ChatEntity(
+                            messageId = messageId,
                             myIdentity = myIdentity,
                             peerIdentity = receiverIdentity!!,
                             fromIdentity = myIdentity,
                             originalText = text,
-                            isRead = true   // sender message is always read
+                            timestamp = System.currentTimeMillis(),
+                            isRead = true,
+                            status = "PENDING"
                         )
                     )
+
                 }
+                schedulePendingRetry()
 
                 inputMessage.setText("")
 
 
             }
         }
+        lifecycleScope.launch {
+            retryPendingMessages()
+        }
 
         lifecycleScope.launch {
             DbProvider.db.chatDao()
                 .markChatRead(myIdentity, receiverIdentity!!)
         }
+
+        val btnTts = findViewById<ImageButton>(R.id.btnTtsToggle)
+
+        btnTts.setOnClickListener {
+            isTtsEnabled = !isTtsEnabled
+
+            btnTts.setImageResource(
+                if (isTtsEnabled)
+                    android.R.drawable.ic_lock_silent_mode_off
+                else
+                    android.R.drawable.ic_lock_silent_mode
+            )
+        }
+
+
+    }
+
+    private fun schedulePendingRetry() {
+
+        val request = OneTimeWorkRequestBuilder<PendingMessageWorker>()
+            .setConstraints(
+                Constraints.Builder()
+                    .setRequiredNetworkType(NetworkType.CONNECTED)
+                    .build()
+            )
+            .setBackoffCriteria(
+                BackoffPolicy.EXPONENTIAL,
+                10,
+                TimeUnit.SECONDS
+            )
+            .build()
+
+        WorkManager.getInstance(this)
+            .enqueueUniqueWork(
+                "pending_chat_retry",
+                ExistingWorkPolicy.REPLACE,
+                request
+            )
     }
 
     private fun formatPhoneNumber(number: String): String {
@@ -326,6 +401,24 @@ class ChatActivity : AppCompatActivity() {
     }
 
 
+
+    private suspend fun retryPendingMessages() {
+
+        val pending = DbProvider.db.chatDao().getPendingMessages()
+
+        pending.forEach {
+
+            try {
+
+                sendToBackend(it.messageId, it.originalText)
+
+                DbProvider.db.chatDao()
+                    .markMessageSent(it.messageId)
+
+            } catch (e: Exception) {
+            }
+        }
+    }
 
     private fun startChatSTT() {
 
@@ -467,6 +560,31 @@ class ChatActivity : AppCompatActivity() {
         speechRecognizer.stopListening()
     }
 
+
+    private fun playTtsAudio(base64: String) {
+
+        val audioBytes = Base64.decode(base64, Base64.DEFAULT)
+
+        val tempFile = File.createTempFile("tts", ".mp3", cacheDir)
+        tempFile.writeBytes(audioBytes)
+
+        val mediaPlayer = MediaPlayer().apply {
+            setDataSource(tempFile.absolutePath)
+            prepare()
+            start()
+        }
+
+        mediaPlayer.setOnCompletionListener {
+            it.release()
+            tempFile.delete()
+        }
+    }
+
+
+
+
+
+
     private fun loadStoredMessages() {
         chatContainer.removeAllViews()
         receivedMessages.clear()
@@ -481,14 +599,14 @@ class ChatActivity : AppCompatActivity() {
             msgs.forEach { entity ->
 
                 val msg = if (entity.fromIdentity == me) {
-                    createSenderMessage(entity.originalText)
+                    createSenderMessage(entity.messageId, entity.originalText)
                 } else {
-                    createReceiverMessage(entity.fromIdentity, entity.originalText)
+                    createReceiverMessage(entity.messageId, entity.fromIdentity, entity.originalText)
                 }
 
                 msg.dbId = entity.id
                 receivedMessages.add(msg)
-
+                updateMessageStatus(msg, entity.status)
                 // Detect language
                 LanguageIdentification.getClient()
                     .identifyLanguage(entity.originalText)
@@ -662,12 +780,13 @@ class ChatActivity : AppCompatActivity() {
 
 
 
-    private fun sendToBackend(original: String) {
+    private fun sendToBackend(messageId: String, original: String){
         val prefs = getSharedPreferences("app_prefs", MODE_PRIVATE)
         val from = prefs.getString("identity", "") ?: return
         val to = receiverIdentity ?: return
 
         val json = JSONObject().apply {
+            put("messageId", messageId)
             put("from", from)
             put("to", to)
             put("original", original)
@@ -683,7 +802,22 @@ class ChatActivity : AppCompatActivity() {
 
         OkHttpClient().newCall(req).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {}
-            override fun onResponse(call: Call, response: Response) {}
+            override fun onResponse(call: Call, response: Response) {
+
+                if (response.isSuccessful) {
+                    runOnUiThread {
+
+                        receivedMessages.find { it.messageId == messageId }?.let {
+                            updateMessageStatus(it, "SENT")
+                        }
+                    }
+                    CoroutineScope(Dispatchers.IO).launch {
+
+                        DbProvider.db.chatDao()
+                            .markMessageSent(messageId)
+                    }
+                }
+            }
         })
     }
 
@@ -694,18 +828,22 @@ class ChatActivity : AppCompatActivity() {
         override fun onReceive(context: Context?, intent: Intent?) {
 
 
-            val from = intent?.getStringExtra("from")
-            val original = intent?.getStringExtra("original")
+            val from = intent?.getStringExtra("from") ?: return
+            val original = intent?.getStringExtra("original") ?: return
 
+            if (original.isEmpty()) return
 
-            if (from == null || original == null) return
-
-            val fromNorm = from.replace("\\D".toRegex(), "")
+            val fromNorm = PhoneUtils.normalizeIdentity(from)
             if (fromNorm == myIdentity) return
 
-            val msg = createReceiverMessage(from, original)
+            val messageId = intent?.getStringExtra("messageId") ?: UUID.randomUUID().toString()
 
+            // 🔥 Prevent duplicate messages
+            if (receivedMessages.any { it.messageId == messageId }) {
+                return
+            }
 
+            val msg = createReceiverMessage(messageId, from, original)
             receivedMessages.add(msg)
             detectOriginalLanguage(msg)
 
@@ -718,6 +856,13 @@ class ChatActivity : AppCompatActivity() {
                 msg.englishText = translated
                 msg.englishView.text = translated
                 applyReceiverVisibility()
+
+                val selectedLang =
+                    languages[spinnerTarget.selectedItemPosition].translateCode
+
+                if (isTtsEnabled && selectedLang == "en") {
+                    requestTts(translated, "en")
+                }
             }
 
 
@@ -730,6 +875,10 @@ class ChatActivity : AppCompatActivity() {
                     msg.targetTranslations[selectedLang] = translated
                     msg.targetView?.text = translated
                     applyReceiverVisibility()
+
+                    if (isTtsEnabled) {
+                        requestTts(translated, selectedLang)
+                    }
                 }
             }
 
@@ -740,6 +889,88 @@ class ChatActivity : AppCompatActivity() {
         }
 
     }
+
+    private val deliveredReceiver = object : BroadcastReceiver() {
+
+        override fun onReceive(context: Context?, intent: Intent?) {
+
+            val messageId = intent?.getStringExtra("messageId") ?: return
+
+            receivedMessages.find { it.messageId == messageId }?.let {
+
+                updateMessageStatus(it, "DELIVERED")
+
+                lifecycleScope.launch {
+                    DbProvider.db.chatDao().markDelivered(messageId)
+                }
+            }
+        }
+    }
+
+    private val readReceiver = object : BroadcastReceiver() {
+
+        override fun onReceive(context: Context?, intent: Intent?) {
+
+            val messageId = intent?.getStringExtra("messageId") ?: return
+
+            if (messageId == "ALL") {
+
+                receivedMessages.forEach {
+
+                    if (it.from == myIdentity) {
+
+                        updateMessageStatus(it, "READ")
+
+                        lifecycleScope.launch {
+                            DbProvider.db.chatDao().markRead(it.messageId)
+                        }
+                    }
+                }
+
+            } else {
+
+                receivedMessages.find { it.messageId == messageId }?.let {
+                    updateMessageStatus(it, "READ")
+                }
+            }
+        }
+    }
+
+
+    private fun requestTts(text: String, lang: String) {
+
+        val json = JSONObject().apply {
+            put("text", text)
+            put("lang", lang)
+            put("gender", "female")
+        }
+
+        val body = json.toString()
+            .toRequestBody("application/json".toMediaType())
+
+        val req = Request.Builder()
+            .url("https://nodical-earlie-unyieldingly.ngrok-free.dev/chat/tts")
+            .post(body)
+            .build()
+
+        OkHttpClient().newCall(req).enqueue(object : Callback {
+
+            override fun onFailure(call: Call, e: IOException) {}
+
+            override fun onResponse(call: Call, response: Response) {
+
+                val result = response.body?.string() ?: return
+                val audio = JSONObject(result).optString("audio")
+
+                if (audio.isNotEmpty()) {
+                    runOnUiThread {
+                        playTtsAudio(audio)
+                    }
+                }
+            }
+        })
+    }
+
 
     // ================= UI Bubble =================
 
@@ -758,11 +989,56 @@ class ChatActivity : AppCompatActivity() {
             filter,
             Context.RECEIVER_NOT_EXPORTED
         )
+
+        registerReceiver(
+            deliveredReceiver,
+            IntentFilter("ACTION_MESSAGE_DELIVERED"),
+            Context.RECEIVER_NOT_EXPORTED
+        )
+
+        registerReceiver(
+            readReceiver,
+            IntentFilter("ACTION_MESSAGE_READ"),
+            Context.RECEIVER_NOT_EXPORTED
+        )
+
+        lifecycleScope.launch {
+
+            DbProvider.db.chatDao()
+                .markChatRead(myIdentity, receiverIdentity!!)
+            notifyReadToServer()
+
+            val intent = Intent("ACTION_MESSAGE_READ").apply {
+                putExtra("messageId", "ALL")
+                `package` = packageName
+            }
+
+            sendBroadcast(intent)
+        }
     }
 
+    private fun notifyReadToServer() {
 
+        val json = JSONObject().apply {
+            put("reader", myIdentity)
+            put("peer", receiverIdentity)
+        }
 
-    private fun createSenderMessage(message: String): ChatMessage {
+        val body = json.toString()
+            .toRequestBody("application/json".toMediaType())
+
+        val req = Request.Builder()
+            .url("https://nodical-earlie-unyieldingly.ngrok-free.dev/chat/read")
+            .post(body)
+            .build()
+
+        OkHttpClient().newCall(req).enqueue(object: Callback {
+            override fun onFailure(call: Call, e: IOException) {}
+            override fun onResponse(call: Call, response: Response) {}
+        })
+    }
+
+    private fun createSenderMessage(messageId: String, message: String): ChatMessage{
 
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -782,6 +1058,12 @@ class ChatActivity : AppCompatActivity() {
             setPadding(24, 14, 24, 14)
             background = getDrawable(R.drawable.bg_original_sender)
         }
+        val statusView = TextView(this).apply {
+            text = "⏳"
+            textSize = 12f
+            setTextColor(Color.LTGRAY)
+            gravity = Gravity.END
+        }
 
         val englishView = TextView(this).apply {
             text = "Translating..."
@@ -792,17 +1074,21 @@ class ChatActivity : AppCompatActivity() {
 
         container.addView(originalView)
         container.addView(englishView)
+        container.addView(statusView)
         chatContainer.addView(container)
         scrollToBottom()
 
         // ✅ CREATE msg FIRST
         val msg = ChatMessage(
+            messageId = messageId,
             from = myIdentity,
             original = message,
             container = container,
             englishView = englishView,
             targetView = null
         )
+
+        msg.statusView = statusView
 
         // ✅ NOW msg is available
         container.setOnLongClickListener {
@@ -811,7 +1097,10 @@ class ChatActivity : AppCompatActivity() {
                 .setPositiveButton("Delete") { _, _ ->
                     lifecycleScope.launch {
                         msg.dbId?.let {
-                            DbProvider.db.chatDao().deleteMessage(it)
+
+                            DbProvider.db.chatDao().deleteMessage(msg.messageId)
+
+                            deleteMessageFromServer(msg.messageId)
                         }
                         chatContainer.removeView(container)
                         receivedMessages.remove(msg)
@@ -826,9 +1115,35 @@ class ChatActivity : AppCompatActivity() {
     }
 
 
+    private fun updateMessageStatus(msg: ChatMessage, status: String) {
 
+        val view = msg.statusView ?: return
 
-    private fun createReceiverMessage(from: String, message: String): ChatMessage {
+        when (status) {
+
+            "PENDING" -> {
+                view.text = "⏳"
+                view.setTextColor(Color.GRAY)
+            }
+
+            "SENT" -> {
+                view.text = "✓"
+                view.setTextColor(Color.GRAY)
+            }
+
+            "DELIVERED" -> {
+                view.text = "✓✓"
+                view.setTextColor(Color.GRAY)
+            }
+
+            "READ" -> {
+                view.text = "✓✓"
+                view.setTextColor(Color.BLUE)
+            }
+        }
+    }
+
+    private fun createReceiverMessage(messageId: String, from: String, message: String): ChatMessage {
 
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -868,6 +1183,7 @@ class ChatActivity : AppCompatActivity() {
 
         // ✅ CREATE msg FIRST
         val msg = ChatMessage(
+            messageId = messageId,
             from = from,
             original = message,
             container = container,
@@ -881,8 +1197,12 @@ class ChatActivity : AppCompatActivity() {
                 .setTitle("Delete message?")
                 .setPositiveButton("Delete") { _, _ ->
                     lifecycleScope.launch {
-                        msg.dbId?.let {
-                            DbProvider.db.chatDao().deleteMessage(it)
+                        msg.dbId?.let { id ->
+
+                            DbProvider.db.chatDao().deleteMessage(msg.messageId)
+
+                            deleteMessageFromServer(msg.messageId)
+
                         }
                         chatContainer.removeView(container)
                         receivedMessages.remove(msg)
@@ -922,8 +1242,10 @@ class ChatActivity : AppCompatActivity() {
 
             override fun onResponse(call: Call, response: Response) {
                 val result = response.body?.string()
-                val translated =
+                val encrypted =
                     JSONObject(result ?: "{}").optString("translated", text)
+
+                val translated = CryptoUtils.decrypt(encrypted)
 
                 runOnUiThread { onResult(translated) }
             }
@@ -935,7 +1257,27 @@ class ChatActivity : AppCompatActivity() {
 
 
 
+    private fun deleteMessageFromServer(messageId: String) {
 
+        val json = JSONObject().apply {
+            put("messageId", messageId)
+        }
+
+        val body = json.toString()
+            .toRequestBody("application/json".toMediaType())
+
+        val req = Request.Builder()
+            .url("https://nodical-earlie-unyieldingly.ngrok-free.dev/chat/delete")
+            .post(body)
+            .build()
+
+        OkHttpClient().newCall(req).enqueue(object : Callback {
+
+            override fun onFailure(call: Call, e: IOException) {}
+
+            override fun onResponse(call: Call, response: Response) {}
+        })
+    }
 
 
 
@@ -950,6 +1292,8 @@ class ChatActivity : AppCompatActivity() {
                 .markChatRead(myIdentity, receiverIdentity!!)
         }
         unregisterReceiver(chatReceiver)
+        unregisterReceiver(deliveredReceiver)
+        unregisterReceiver(readReceiver)
     }
 
     override fun onDestroy() {

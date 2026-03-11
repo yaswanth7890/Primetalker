@@ -40,13 +40,14 @@ ORDER BY lastTime DESC
 
 
 
-    @Query("DELETE FROM chats WHERE id = :messageId")
-    suspend fun deleteMessage(messageId: Long)
+    @Query("DELETE FROM chats WHERE messageId = :messageId")
+    suspend fun deleteMessage(messageId: String)
 
 
     @Query("""
-    DELETE FROM chats
-    WHERE myIdentity = :me AND peerIdentity = :peer
+DELETE FROM chats
+WHERE (myIdentity = :me AND peerIdentity = :peer)
+   OR (myIdentity = :peer AND peerIdentity = :me)
 """)
     suspend fun deleteChat(me: String, peer: String)
 
@@ -60,8 +61,21 @@ AND peerIdentity = :peer
 """)
     suspend fun markChatRead(me: String, peer: String)
 
+    @Query("SELECT * FROM chats WHERE status='PENDING'")
+    suspend fun getPendingMessages(): List<ChatEntity>
+    @Query("UPDATE chats SET status='SENT' WHERE messageId=:messageId")
+    suspend fun markMessageSent(messageId: String)
 
+    @Query("UPDATE chats SET status='DELIVERED' WHERE messageId=:messageId")
+    suspend fun markMessageDelivered(messageId: String)
 
+    @Query("UPDATE chats SET status='DELIVERED' WHERE messageId=:messageId")
+    suspend fun markDelivered(messageId:String)
 
+    @Query("UPDATE chats SET status='READ' WHERE messageId=:messageId")
+    suspend fun markRead(messageId:String)
+
+    @Query("SELECT * FROM chats WHERE messageId = :id LIMIT 1")
+    suspend fun getMessageById(id: String): ChatEntity?
 
 }

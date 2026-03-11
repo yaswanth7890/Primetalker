@@ -1,6 +1,9 @@
 package com.example.myapplication
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.speech.RecognizerIntent
 import android.speech.tts.TextToSpeech
@@ -24,6 +27,8 @@ import org.json.JSONArray
 import java.io.IOException
 import java.util.*
 import android.util.Log
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 
 
 class MainActivity : AppCompatActivity() {
@@ -92,7 +97,19 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        lifecycleScope.launch {
 
+            val prefs = getSharedPreferences("app_prefs", MODE_PRIVATE)
+
+            val identity = PhoneUtils.normalizeIdentity(
+                prefs.getString("identity", "")!!
+            )
+
+            ChatHistorySync.sync(
+                this@MainActivity,
+                identity
+            )
+        }
 
 
 
@@ -173,8 +190,46 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         })
+
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+
+                requestPermissions(
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    1001
+                )
+            }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT)
+                != PackageManager.PERMISSION_GRANTED) {
+
+                requestPermissions(
+                    arrayOf(android.Manifest.permission.BLUETOOTH_CONNECT),
+                    1002
+                )
+            }
+        }
+        requestIgnoreBatteryOptimizations()
     }
 
+    private fun requestIgnoreBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val pm = getSystemService(POWER_SERVICE) as android.os.PowerManager
+            val packageName = packageName
+
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                val intent = Intent(
+                    android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    android.net.Uri.parse("package:$packageName")
+                )
+                startActivity(intent)
+            }
+        }
+    }
     // --- Dock setup ---
     private fun setupDock() {
         highlightCurrentPage(dockTranslate)

@@ -19,6 +19,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.IntentFilter
 import androidx.core.content.ContextCompat
+import androidx.core.widget.addTextChangedListener
 
 
 
@@ -77,9 +78,10 @@ class ChatListActivity : AppCompatActivity() {
 
         recycler.adapter = adapter
 
-        myIdentity = getSharedPreferences("app_prefs", MODE_PRIVATE)
-            .getString("identity", "")!!
-            .replace("\\D".toRegex(), "")
+        myIdentity = PhoneUtils.normalizeIdentity(
+            getSharedPreferences("app_prefs", MODE_PRIVATE)
+                .getString("identity", "")!!
+        )
 
         loadChats()
     }
@@ -128,18 +130,85 @@ class ChatListActivity : AppCompatActivity() {
             } catch (_: Exception) { }
         }
     }
+
+
+
+    private fun loadContacts(): List<String> {
+
+        val list = mutableListOf<String>()
+
+        val cursor = contentResolver.query(
+            android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+            arrayOf(
+                android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER
+            ),
+            null,
+            null,
+            android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC"
+        )
+
+        cursor?.use {
+
+            while (it.moveToNext()) {
+
+                val name = it.getString(0)
+                val number = PhoneUtils.normalizeIdentity(
+                    it.getString(1)
+                )
+
+                list.add("$name|$number|contact")
+            }
+        }
+
+        if (list.isEmpty()) {
+            list.add("No contact found")
+        }
+
+        return list
+    }
+
+
     private fun showNewChatDialog() {
-        val et = EditText(this).apply {
-            hint = "Enter phone number"
-            inputType = android.text.InputType.TYPE_CLASS_PHONE
+
+        val dialogView = layoutInflater.inflate(R.layout.dialog_new_chat, null)
+
+        val etSearch = dialogView.findViewById<EditText>(R.id.etSearch)
+        val recycler = dialogView.findViewById<RecyclerView>(R.id.recyclerContacts)
+
+        recycler.layoutManager = LinearLayoutManager(this)
+
+        val contactList = loadContacts()
+
+        val adapter = ContactsAdapter(
+            contactList,
+            onAudioClick = {},
+            onVideoClick = {},
+            onDeleteClick = {}
+        )
+
+        recycler.adapter = adapter
+
+        // search filtering
+        etSearch.addTextChangedListener { text ->
+
+            val query = text.toString().lowercase()
+
+            val filtered = contactList.filter { item ->
+                item.lowercase().contains(query)
+            }
+
+            adapter.updateList(filtered)
         }
 
         AlertDialog.Builder(this)
             .setTitle("New Chat")
-            .setView(et)
+            .setView(dialogView)
             .setPositiveButton("Start") { _, _ ->
-                val number = et.text.toString().trim()
-                    .replace("\\D".toRegex(), "")
+
+                val number = PhoneUtils.normalizeIdentity(
+                    etSearch.text.toString()
+                )
 
                 if (number.isNotEmpty()) {
                     val i = Intent(this, ChatActivity::class.java)

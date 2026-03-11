@@ -40,7 +40,10 @@ class ChatListAdapter(
     override fun onBindViewHolder(h: VH, pos: Int) {
         val item = getItem(pos)
 
-        h.name.text = item.peerIdentity
+        h.name.text = PhoneUtils.getDisplayName(
+            h.itemView.context,
+            item.peerIdentity
+        )
         h.last.text = item.lastMessage ?: ""
 
         if (item.unreadCount > 0) {

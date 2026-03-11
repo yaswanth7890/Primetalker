@@ -102,6 +102,14 @@ class SettingsActivity : AppCompatActivity() {
         get() = prefs.getString("profile_name", "") ?: ""
         set(v) = prefs.edit().putString("profile_name", v).apply()
 
+    private lateinit var radioVoiceGroup: RadioGroup
+    private lateinit var radioMale: RadioButton
+    private lateinit var radioFemale: RadioButton
+
+    private var voiceGender: String
+        get() = prefs.getString("voice_gender", "female") ?: "female"
+        set(v) = prefs.edit().putString("voice_gender", v).apply()
+
     override fun onCreate(savedInstanceState: Bundle?) {
 
 
@@ -174,6 +182,35 @@ class SettingsActivity : AppCompatActivity() {
             }
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
+
+
+        radioVoiceGroup = findViewById(R.id.radioVoiceGroup)
+        radioMale = findViewById(R.id.radioMale)
+        radioFemale = findViewById(R.id.radioFemale)
+
+// restore saved value
+        if (voiceGender == "male") {
+            radioMale.isChecked = true
+        } else {
+            radioFemale.isChecked = true
+        }
+
+        radioVoiceGroup.setOnCheckedChangeListener { _, checkedId ->
+            val selected = if (checkedId == R.id.radioMale) "male" else "female"
+            voiceGender = selected
+
+            val identity = prefs.getString("identity", "")!!
+                .replace("[^0-9]".toRegex(), "")
+
+            val json = JSONObject().apply {
+                put("identity", identity)
+                put("preferredLang", preferredLanguage)
+                put("voiceGender", selected)
+            }
+
+            httpPost("$BACKEND_BASE_URL/set-preferred-language", json) { _, _, _ -> }
+        }
+
 
         // Switches
         switchNotifications.isChecked = notificationsEnabled

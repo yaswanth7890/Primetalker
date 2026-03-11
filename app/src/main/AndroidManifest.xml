@@ -11,18 +11,21 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" tools:targetApi="31" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-    <uses-permission android:name="android.permission.CALL_PHONE" />
+
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+
+
     <uses-permission android:name="android.permission.VIBRATE" />
+
+
 
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
 
     <!-- Optional hardware features -->
     <uses-feature android:name="android.hardware.camera" android:required="false" />
@@ -84,8 +87,7 @@
         <service
             android:name=".IncomingCallService"
             android:exported="false"
-            android:foregroundServiceType="phoneCall" />
-
+            android:foregroundServiceType="mediaPlayback" />
 
 
 
@@ -117,7 +119,8 @@
             android:name=".CallScreenActivity"
             android:exported="true"
             android:showWhenLocked="true"
-            android:turnScreenOn="true" />
+            android:turnScreenOn="true"
+            android:launchMode="singleTop" />
 
 
 

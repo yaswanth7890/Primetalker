@@ -30,12 +30,14 @@ import android.util.Log
 import android.view.MotionEvent
 
 
-
+data class ContactItem(
+    val name: String,
+    val number: String
+)
 class CallActivity : AppCompatActivity() {
 
     private lateinit var edtPhoneNumber: EditText
     private lateinit var spinnerCountryCode: Spinner
-
 
 
     private lateinit var searchBar: EditText
@@ -52,7 +54,7 @@ class CallActivity : AppCompatActivity() {
 
     private val REQUEST_CONTACT = 100
     private lateinit var recyclerAdapter: ContactsAdapter
-    private val contactsList = mutableListOf<String>()
+    private val contactsList = mutableListOf<ContactItem>()
     private val countryCodes = listOf("+1", "+91", "+44", "+81", "+61", "+49")
 
     // TODO: set your backend base URL & current user id
@@ -61,7 +63,21 @@ class CallActivity : AppCompatActivity() {
     private val CURRENT_USER_ID: String
         get() = prefs.getString("identity", "") ?: ""
 
+    private val AUDIO_PERMISSION_CODE = 991
 
+    private val CONTACT_PERMISSION_CODE = 992
+    private var isSearching = false
+    private fun hasAudioPermission(): Boolean {
+        return checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun requestAudioPermission() {
+        requestPermissions(
+            arrayOf(android.Manifest.permission.RECORD_AUDIO),
+            AUDIO_PERMISSION_CODE
+        )
+    }
 
     private fun normalizePhoneWithCountry(number: String): String {
         var cleaned = number.trim().replace(" ", "").replace("-", "")
@@ -77,6 +93,39 @@ class CallActivity : AppCompatActivity() {
 
         // Combine country code + digits
         return countryCode + cleaned
+    }
+
+
+    private fun toE164(number: String): String? {
+        return try {
+            val phoneUtil = com.google.i18n.phonenumbers.PhoneNumberUtil.getInstance()
+
+            val region = phoneUtil.getRegionCodeForCountryCode(
+                spinnerCountryCode.selectedItem.toString().replace("+", "").toInt()
+            )
+
+            val parsed = phoneUtil.parse(number, region)
+
+            phoneUtil.format(
+                parsed,
+                com.google.i18n.phonenumbers.PhoneNumberUtil.PhoneNumberFormat.E164
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun formatInternational(number: String): String {
+        return try {
+            val phoneUtil = com.google.i18n.phonenumbers.PhoneNumberUtil.getInstance()
+            val parsed = phoneUtil.parse(number, null)
+            phoneUtil.format(
+                parsed,
+                com.google.i18n.phonenumbers.PhoneNumberUtil.PhoneNumberFormat.INTERNATIONAL
+            )
+        } catch (e: Exception) {
+            number
+        }
     }
 
     private val voiceListener = object : VoiceCall.Listener {
@@ -113,12 +162,15 @@ class CallActivity : AppCompatActivity() {
     }
 
 
-
-
     override fun onCreate(savedInstanceState: Bundle?) {
+
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_call)
-
+        if (!hasContactPermission()) {
+            requestContactPermission()
+        } else {
+            loadPhoneContacts()
+        }
         edtPhoneNumber = findViewById(R.id.edtPhoneNumber)
         spinnerCountryCode = findViewById(R.id.spinnerCountryCode)
         searchBar = findViewById(R.id.searchBar)
@@ -128,9 +180,6 @@ class CallActivity : AppCompatActivity() {
         btnDeleteNumber = findViewById(R.id.btnDeleteNumber)
         dialerPanel = findViewById(R.id.dialerPanel)
         fabDialer = findViewById(R.id.fabDialer)
-
-
-
 
 
         val handle = findViewById<View>(R.id.dragHandle)
@@ -185,7 +234,6 @@ class CallActivity : AppCompatActivity() {
         })
 
 
-
         val countryAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, countryCodes)
         countryAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         spinnerCountryCode.adapter = countryAdapter
@@ -193,26 +241,55 @@ class CallActivity : AppCompatActivity() {
 
         recyclerAdapter = ContactsAdapter(
             emptyList(),
-            onAudioClick = { number -> startPstnCall(number) },
-            onVideoClick = { number -> startAppVideoCall(number) }
+            onAudioClick = { number -> startSmartVoiceCall(number) },
+            onVideoClick = { number -> startAppVideoCall(number) },
+            onDeleteClick = { peer -> deleteHistory(peer) }
         )
         val recyclerView = findViewById<RecyclerView>(R.id.recyclerMixed)
         recyclerView.adapter = recyclerAdapter
         recyclerView.layoutManager = LinearLayoutManager(this)
         recyclerAdapter.updateList(listOf("No contact found"))
+        if (hasContactPermission()) {
+            loadPhoneContacts()
+            loadCallHistory()
+        }
 
         searchBar.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable?) {
+
                 val query = s.toString().trim()
-                val filtered = if (query.isEmpty()) {
-                    if (contactsList.isEmpty()) listOf("No contact found") else contactsList
-                } else {
-                    val f = contactsList.filter { it.contains(query, ignoreCase = true) }
-                    if (f.isEmpty()) listOf("No contact found") else f
+
+                isSearching = query.isNotEmpty()
+
+                if (!isSearching) {
+                    loadCallHistory()
+                    return
                 }
-                recyclerAdapter.updateList(filtered)
+
+                val queryLower = query.lowercase()
+                val queryDigits = digitsOnly(query)
+
+                val filteredContacts = contactsList.filter {
+
+                    val nameMatch = it.name.contains(query, ignoreCase = true)
+
+                    val numberMatch =
+                        queryDigits.isNotEmpty() &&
+                                digitsOnly(it.number).contains(queryDigits)
+
+                    nameMatch || numberMatch
+                }
+
+                val displayList = filteredContacts.map {
+                    "${it.name}|${it.number}|contact"
+                }
+
+                recyclerAdapter.updateList(
+                    if (displayList.isEmpty()) listOf("No contact found")
+                    else displayList
+                )
             }
         })
 
@@ -223,11 +300,19 @@ class CallActivity : AppCompatActivity() {
         highlightCurrentPage(dockCalls)
 
         dockChats.setOnClickListener { startActivity(Intent(this, ChatListActivity::class.java)) }
-        dockSettings.setOnClickListener { startActivity(Intent(this, SettingsActivity::class.java)) }
+        dockSettings.setOnClickListener {
+            startActivity(
+                Intent(
+                    this,
+                    SettingsActivity::class.java
+                )
+            )
+        }
         dockTranslate.setOnClickListener { startActivity(Intent(this, MainActivity::class.java)) }
 
         btnPickContact.setOnClickListener {
-            val intent = Intent(Intent.ACTION_PICK, ContactsContract.CommonDataKinds.Phone.CONTENT_URI)
+            val intent =
+                Intent(Intent.ACTION_PICK, ContactsContract.CommonDataKinds.Phone.CONTENT_URI)
             startActivityForResult(intent, REQUEST_CONTACT)
         }
 
@@ -266,6 +351,33 @@ class CallActivity : AppCompatActivity() {
         }
     }
 
+
+    override fun onResume() {
+        super.onResume()
+
+        // Only reload history if search bar is empty
+        if (searchBar.text.toString().trim().isEmpty()) {
+            loadCallHistory()
+        }
+    }
+
+    private fun deleteHistory(peer: String) {
+
+        val identity = prefs.getString("identity", "")!!
+            .replace("[^0-9]".toRegex(), "")
+
+        val json = JSONObject().apply {
+            put("identity", identity)
+            put("peer", peer.replace("[^0-9]".toRegex(), ""))
+        }
+
+        httpPost("$BACKEND_BASE_URL/delete-call-history", json) { ok, _, _ ->
+            if (ok) {
+                runOnUiThread { loadCallHistory() }
+            }
+        }
+    }
+
     private fun toggleDialer() {
         if (dialerPanel.visibility == View.VISIBLE) {
             dialerPanel.visibility = View.GONE
@@ -287,15 +399,20 @@ class CallActivity : AppCompatActivity() {
     private fun startPstnCall(e164Number: String) {
         CallHolder.isOutgoing = true   // ✅ mark early
         val prefs = getSharedPreferences("app_prefs", MODE_PRIVATE)
-        val idDigits = prefs.getString("identity", CURRENT_USER_ID)?.replace("[^0-9]".toRegex(), "") ?: CURRENT_USER_ID
+        val idDigits = prefs.getString("identity", CURRENT_USER_ID)?.replace("[^0-9]".toRegex(), "")
+            ?: CURRENT_USER_ID
         httpGet("$BACKEND_BASE_URL/voice-token?identity=$idDigits") { ok, json, err ->
             if (!ok) {
-                runOnUiThread { Toast.makeText(this, "Voice token error: $err", Toast.LENGTH_SHORT).show() }
+                runOnUiThread {
+                    Toast.makeText(this, "Voice token error: $err", Toast.LENGTH_SHORT).show()
+                }
                 return@httpGet
             }
             val token = json.optString("token")
             if (token.isNullOrEmpty()) {
-                runOnUiThread { Toast.makeText(this, "Missing Voice token", Toast.LENGTH_SHORT).show() }
+                runOnUiThread {
+                    Toast.makeText(this, "Missing Voice token", Toast.LENGTH_SHORT).show()
+                }
                 return@httpGet
             }
 
@@ -304,18 +421,23 @@ class CallActivity : AppCompatActivity() {
                 .build()
 
 
-
             val activeCall: VoiceCall = Voice.connect(this, options, object : VoiceCall.Listener {
                 override fun onConnected(call: VoiceCall) {}
                 override fun onDisconnected(call: VoiceCall, error: CallException?) {}
                 override fun onConnectFailure(call: VoiceCall, error: CallException) {
-                    runOnUiThread { Toast.makeText(this@CallActivity, "Connect failed: ${error.message}", Toast.LENGTH_SHORT).show() }
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@CallActivity,
+                            "Connect failed: ${error.message}",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
                 }
+
                 override fun onRinging(call: VoiceCall) {}
                 override fun onReconnecting(call: VoiceCall, error: CallException) {}
                 override fun onReconnected(call: VoiceCall) {}
             })
-
 
 
             val i = Intent(this, CallScreenActivity::class.java).apply {
@@ -327,15 +449,119 @@ class CallActivity : AppCompatActivity() {
     }
 
 
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
 
+        if (requestCode == AUDIO_PERMISSION_CODE) {
+            if (grantResults.isNotEmpty() &&
+                grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+                Toast.makeText(this, "Permission granted. Please try calling again.", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Microphone permission is required for calls.", Toast.LENGTH_LONG).show()
+            }
+        }
+
+        if (requestCode == CONTACT_PERMISSION_CODE) {
+            if (grantResults.isNotEmpty() &&
+                grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+
+                loadPhoneContacts()
+                loadCallHistory()
+            }
+        }
+    }
+
+
+
+    private fun hasContactPermission(): Boolean {
+        return checkSelfPermission(android.Manifest.permission.READ_CONTACTS) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun requestContactPermission() {
+        requestPermissions(
+            arrayOf(android.Manifest.permission.READ_CONTACTS),
+            CONTACT_PERMISSION_CODE
+        )
+    }
+
+
+    private fun loadPhoneContacts() {
+
+        contactsList.clear()
+
+        val cursor = contentResolver.query(
+            ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+            arrayOf(
+                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                ContactsContract.CommonDataKinds.Phone.NUMBER
+            ),
+            null,
+            null,
+            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC"
+        )
+
+        cursor?.use {
+            while (it.moveToNext()) {
+
+                val name = it.getString(0) ?: continue
+                val numberRaw = it.getString(1) ?: continue
+
+                val phoneUtil = com.google.i18n.phonenumbers.PhoneNumberUtil.getInstance()
+
+                try {
+
+                    val parsed = phoneUtil.parse(numberRaw, null)
+
+                    val e164 = phoneUtil.format(
+                        parsed,
+                        com.google.i18n.phonenumbers.PhoneNumberUtil.PhoneNumberFormat.E164
+                    )
+
+                    val identity = e164.replace("+", "")
+
+                    contactsList.add(
+                        ContactItem(
+                            name = name,
+                            number = identity
+                        )
+                    )
+
+                } catch (e: Exception) {
+
+                    val identity = PhoneUtils.normalizeIdentity(numberRaw)
+
+                    contactsList.add(
+                        ContactItem(
+                            name = name,
+                            number = identity
+                        )
+                    )
+                }
+            }
+        }
+
+        Log.d("DEBUG", "Loaded contacts: ${contactsList.size}")
+    }
+
+    private fun digitsOnly(number: String): String {
+        return number.replace("[^0-9]".toRegex(), "")
+    }
 
     private fun startSmartVoiceCall(targetNumber: String) {
-
+        if (!hasAudioPermission()) {
+            requestAudioPermission()
+            return
+        }
         // 0️⃣ Get caller identity FIRST
         val prefs = getSharedPreferences("app_prefs", MODE_PRIVATE)
         val fromDigits = prefs.getString("identity", "")!!
             .replace("[^0-9]".toRegex(), "")
-
 
 
         // 1️⃣ Get Voice token
@@ -353,9 +579,11 @@ class CallActivity : AppCompatActivity() {
 
             // 2️⃣ CONNECT CALLER VIA VOICE SDK
             val options = ConnectOptions.Builder(token)
-                .params(mapOf(
-                    "To" to targetNumber.replace("[^0-9]".toRegex(), "")
-                ))
+                .params(
+                    mapOf(
+                        "To" to "+${PhoneUtils.normalizeIdentity(targetNumber)}"
+                    )
+                )
                 .build()
 
             CallHolder.activeCall = Voice.connect(
@@ -373,6 +601,8 @@ class CallActivity : AppCompatActivity() {
                 }
             ) { _, _, _ -> }
 
+            loadCallHistory()
+
             // 4️⃣ NOW open UI
             startActivity(
                 Intent(this, CallScreenActivity::class.java).apply {
@@ -385,13 +615,11 @@ class CallActivity : AppCompatActivity() {
     }
 
 
-
-
     // ---------- Outgoing App↔App video via Twilio Video ----------
     private fun startAppVideoCall(peerIdentity: String) {
         // ✅ Always prepend country code if missing
         val selectedCode = spinnerCountryCode.selectedItem.toString()
-        val normalized = normalizePhoneWithCountry(peerIdentity)
+        val normalized = PhoneUtils.normalizeIdentity(peerIdentity)
 
 
         // ✅ Get stored Twilio identity (do not use CURRENT_USER_ID)
@@ -399,14 +627,22 @@ class CallActivity : AppCompatActivity() {
         val fromIdentity = prefs.getString("identity", null)
         if (fromIdentity.isNullOrEmpty()) {
             runOnUiThread {
-                Toast.makeText(this, "No Twilio identity found — please re-login.", Toast.LENGTH_LONG).show()
+                Toast.makeText(
+                    this,
+                    "No Twilio identity found — please re-login.",
+                    Toast.LENGTH_LONG
+                ).show()
             }
             return
         }
 
         if (fromIdentity == null) {
             runOnUiThread {
-                Toast.makeText(this, "No Twilio identity found — please re-login.", Toast.LENGTH_LONG).show()
+                Toast.makeText(
+                    this,
+                    "No Twilio identity found — please re-login.",
+                    Toast.LENGTH_LONG
+                ).show()
             }
             return
         }
@@ -421,9 +657,14 @@ class CallActivity : AppCompatActivity() {
             if (state == VoiceCall.State.CONNECTING ||
                 state == VoiceCall.State.RINGING ||
                 state == VoiceCall.State.CONNECTED ||
-                state == VoiceCall.State.RECONNECTING) {
+                state == VoiceCall.State.RECONNECTING
+            ) {
 
-                Toast.makeText(this, "Voice call in progress — can’t start video.", Toast.LENGTH_SHORT).show()
+                Toast.makeText(
+                    this,
+                    "Voice call in progress — can’t start video.",
+                    Toast.LENGTH_SHORT
+                ).show()
                 return
             }
 
@@ -433,7 +674,6 @@ class CallActivity : AppCompatActivity() {
                 CallHolder.activeCall = null
             }
         }
-
 
 
         val payload = JSONObject().apply {
@@ -469,10 +709,9 @@ class CallActivity : AppCompatActivity() {
             }
             startActivity(i)
         }
+
+        loadCallHistory()
     }
-
-
-
 
 
     private fun highlightCurrentPage(current: LinearLayout) {
@@ -488,32 +727,58 @@ class CallActivity : AppCompatActivity() {
                     img.setColorFilter(0xFFFFFFFF.toInt())
                     text.setTextColor(0xFFFFFFFF.toInt())
                 }
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+            }
         }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+
         if (requestCode == REQUEST_CONTACT && resultCode == Activity.RESULT_OK) {
-            val uri = data?.data
-            uri?.let {
-                val cursor = contentResolver.query(
-                    it,
-                    arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
-                    null, null, null
-                )
-                cursor?.use { c ->
-                    if (c.moveToFirst()) {
-                        val number = c.getString(0)
-                        if (number.isNotEmpty() && !contactsList.contains(number)) {
-                            edtPhoneNumber.setText(number)
-                            contactsList.add(number)
+
+            val uri = data?.data ?: return
+
+            val cursor = contentResolver.query(
+                uri,
+                arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
+                null, null, null
+            )
+
+            cursor?.use {
+                if (it.moveToFirst()) {
+
+                    val rawNumber = it.getString(0)
+
+                    // Use libphonenumber to parse correctly
+                    try {
+                        val phoneUtil = com.google.i18n.phonenumbers.PhoneNumberUtil.getInstance()
+
+                        val parsed = phoneUtil.parse(rawNumber, null)
+
+                        val e164 = phoneUtil.format(
+                            parsed,
+                            com.google.i18n.phonenumbers.PhoneNumberUtil.PhoneNumberFormat.E164
+                        )
+
+                        // Extract country code
+                        val countryCode = "+${parsed.countryCode}"
+
+                        // Set spinner automatically
+                        val index = countryCodes.indexOf(countryCode)
+                        if (index >= 0) {
+                            spinnerCountryCode.setSelection(index)
                         }
+
+                        // Set number WITHOUT country code
+                        val national = parsed.nationalNumber.toString()
+                        edtPhoneNumber.setText(national)
+
+                    } catch (e: Exception) {
+                        edtPhoneNumber.setText(rawNumber.replace("[^0-9]".toRegex(), ""))
                     }
                 }
             }
-            if (contactsList.isEmpty()) contactsList.add("No contact found")
-            recyclerAdapter.updateList(contactsList)
         }
     }
 
@@ -521,11 +786,17 @@ class CallActivity : AppCompatActivity() {
     private fun httpGet(url: String, cb: (ok: Boolean, json: JSONObject, err: String?) -> Unit) {
         val req = Request.Builder().url(url).get().build()
         OkHttpClient().newCall(req).enqueue(object : Callback {
-            override fun onFailure(call: OkHttpCall, e: IOException) = cb(false, JSONObject(), e.message)
+            override fun onFailure(call: OkHttpCall, e: IOException) =
+                cb(false, JSONObject(), e.message)
+
             override fun onResponse(call: OkHttpCall, response: Response) {
                 response.use {
                     val body = it.body?.string().orEmpty()
-                    cb(it.isSuccessful, JSONObject(if (body.isEmpty()) "{}" else body), if (it.isSuccessful) null else it.message)
+                    cb(
+                        it.isSuccessful,
+                        JSONObject(if (body.isEmpty()) "{}" else body),
+                        if (it.isSuccessful) null else it.message
+                    )
                 }
             }
         })
@@ -558,14 +829,79 @@ class CallActivity : AppCompatActivity() {
     }
 
 
-
-
-
     private fun isLikelyJson(contentType: String?): Boolean =
         contentType?.lowercase()?.contains("application/json") == true
 
     private fun tryParseJsonOrNull(raw: String): JSONObject? = try {
         JSONObject(raw)
-    } catch (_: Exception) { null }
+    } catch (_: Exception) {
+        null
+    }
 
+
+    private fun loadCallHistory() {
+        if (isSearching) return
+        val identity = prefs.getString("identity", "")!!
+            .replace("[^0-9]".toRegex(), "")
+        Log.d("DEBUG", "Contacts size: ${contactsList.size}")
+        httpGet("$BACKEND_BASE_URL/call-history?identity=$identity") { ok, json, _ ->
+            if (!ok) return@httpGet
+
+            val list = mutableListOf<String>()
+            val arr = json.getJSONArray("history")
+
+            for (i in 0 until arr.length()) {
+
+                val obj = arr.getJSONObject(i)
+
+                val peer = obj.optString("peer", "")
+                val totalCalls = obj.optInt("total_calls", 0)
+                val lastRaw = obj.optString("last_called", "")
+                val direction = obj.optString("last_direction", "outgoing")
+
+                if (peer.isEmpty() || lastRaw.isEmpty()) continue
+
+                try {
+
+                    // Parse ISO time safely
+                    val parser = java.text.SimpleDateFormat(
+                        "yyyy-MM-dd'T'HH:mm:ss",
+                        java.util.Locale.getDefault()
+                    )
+
+                    parser.timeZone = java.util.TimeZone.getTimeZone("UTC")
+
+                    val date = parser.parse(lastRaw.substring(0, 19))
+
+                    val formatter = java.text.SimpleDateFormat(
+                        "dd MMM yyyy • hh:mm a",
+                        java.util.Locale.getDefault()
+                    )
+
+                    val formattedTime = formatter.format(date!!)
+
+                    val peerDigits = digitsOnly(peer)
+
+                    val savedContact = contactsList.firstOrNull {
+                        digitsOnly(it.number).endsWith(peerDigits) ||
+                                peerDigits.endsWith(digitsOnly(it.number))
+                    }
+
+                    val displayName = savedContact?.name ?: formatInternational(peer)
+
+                    list.add("$displayName|$peer|$totalCalls|$formattedTime|$direction")
+
+                } catch (e: Exception) {
+                    Log.e("CallHistory", "Date parse failed: $lastRaw")
+                }
+            }
+
+            runOnUiThread {
+                recyclerAdapter.updateList(
+                    if (list.isEmpty()) listOf("No calls yet")
+                    else list
+                )
+            }
+        }
+    }
 }

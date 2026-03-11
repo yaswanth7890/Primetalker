@@ -69,9 +69,9 @@
             android:layout_weight="1"
             android:layout_marginEnd="40dp"
             android:background="@android:color/transparent"
-            app:srcCompat="@android:drawable/ic_menu_close_clear_cancel"
-            android:tint="#F44336"
-            android:contentDescription="Reject call" />
+            android:src="@drawable/endcall_icon"
+            android:contentDescription="Reject call"
+            app:tint="#F44336" />
 
         <ImageButton
             android:id="@+id/btnAcceptCall"
@@ -80,8 +80,8 @@
             android:layout_weight="1"
             android:background="@android:color/transparent"
             app:srcCompat="@android:drawable/ic_menu_call"
-            android:tint="#4CAF50"
-            android:contentDescription="Accept call" />
+            android:contentDescription="Accept call"
+            app:tint="#4CAF50" />
 
     </LinearLayout>
 

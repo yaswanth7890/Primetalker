@@ -9,5 +9,9 @@ object CallHolder {
 
     var calleeAnswered = false
 
+    var isMuted: Boolean = false
+    var isSpeakerOn: Boolean = false
+
+    val captionHistory = mutableListOf<LiveCaption>()
 
 }

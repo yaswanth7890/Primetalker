@@ -1,11 +1,13 @@
 package com.example.myapplication.db
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
 @Entity(tableName = "chats")
 data class ChatEntity(
-    @PrimaryKey(autoGenerate = true)
+    @PrimaryKey
+    val messageId: String,
     val id: Long = 0,
 
     val myIdentity: String,      // logged-in user
@@ -15,8 +17,10 @@ data class ChatEntity(
     val originalText: String,
     val timestamp: Long = System.currentTimeMillis(),
 
-    val isRead: Boolean = false
+    val isRead: Boolean = false,
 
+    @ColumnInfo(name = "status")
+    var status: String = "SENT",
 
 
 

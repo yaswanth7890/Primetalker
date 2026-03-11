@@ -24,6 +24,9 @@ import org.json.JSONObject
 import java.io.IOException
 import java.net.URLEncoder
 import android.app.NotificationManager
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
+
 
 
 class IncomingCallActivity : AppCompatActivity() {
@@ -45,6 +48,7 @@ class IncomingCallActivity : AppCompatActivity() {
         Manifest.permission.MODIFY_AUDIO_SETTINGS,
         Manifest.permission.CAMERA
     )
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -70,20 +74,34 @@ class IncomingCallActivity : AppCompatActivity() {
         btnRejectCall = findViewById(R.id.btnRejectCall)
 
         wakeUpScreen()
-        startRingtoneAndVibration()
+
         checkAndRequestPermissions()
+        ContextCompat.registerReceiver(
+            this,
+            stopRingReceiver,
+            IntentFilter("STOP_INCOMING_RING"),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
 
         val type = intent.getStringExtra("incoming_type") ?: "VOICE"
         val from = intent.getStringExtra("from") ?: "Unknown"
         val room = intent.getStringExtra("room")
+        val openedFromNotification =
+            intent.getBooleanExtra("opened_from_notification", false)
 
         // ✅ Clean up caller label (remove "client:" prefixes)
-        val realCaller =
+        val rawNumber =
             intent.getStringExtra("from")
                 ?: CallHolder.callerDisplayName
                 ?: "Unknown"
 
-        txtCallerNumber.text = realCaller
+        val contactName = PhoneUtils.getContactName(this, rawNumber)
+
+        if (contactName != null) {
+            txtCallerNumber.text = "$contactName\n${PhoneUtils.formatInternational(rawNumber)}"
+        } else {
+            txtCallerNumber.text = PhoneUtils.formatInternational(rawNumber)
+        }
 
         txtCallType.text = if (type == "VIDEO") "Video Call" else "Audio Call"
 
@@ -91,7 +109,7 @@ class IncomingCallActivity : AppCompatActivity() {
 
         // ---------------- Reject Call ----------------
         btnRejectCall.setOnClickListener {
-            stopRingtoneAndVibration()
+
             CallHolder.isOutgoing = false
 
             try {
@@ -103,13 +121,15 @@ class IncomingCallActivity : AppCompatActivity() {
             IncomingCallHolder.invite = null
 
             // 🔥 Notify backend so caller also ends
+            CallHolder.activeCall?.disconnect()
+            CallHolder.activeCall = null
             notifyEndCall(from)
             finish()
         }
 
         // ---------------- Accept Call ----------------
         btnAcceptCall.setOnClickListener {
-            stopRingtoneAndVibration()
+
 
             if (type == "VIDEO") {
                 handleVideoAccept(from, room)
@@ -118,6 +138,13 @@ class IncomingCallActivity : AppCompatActivity() {
 
             handleVoiceAccept()
         }
+        ContextCompat.registerReceiver(
+            this,
+            closeUiReceiver,
+            IntentFilter("ACTION_CLOSE_INCOMING_UI"),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+
     }
 
     // ------------------- Voice Accept -------------------
@@ -189,13 +216,19 @@ class IncomingCallActivity : AppCompatActivity() {
 
 
                     // ✅ Launch CallScreenActivity with an indicator
-                    val i = Intent(this@IncomingCallActivity, CallScreenActivity::class.java).apply {
+                    val callIntent = Intent(this@IncomingCallActivity, CallScreenActivity::class.java).apply {
                         putExtra("call_mode", "PSTN_AUDIO")
                         putExtra("display_name", displayName)
-                        putExtra("start_timer_now", true) // 👈 added
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                        putExtra("start_timer_now", true)
                     }
-                    startActivity(i)
+
+                    val mainIntent = Intent(this@IncomingCallActivity, MainActivity::class.java)
+
+                    val stackBuilder = android.app.TaskStackBuilder.create(this@IncomingCallActivity)
+                    stackBuilder.addNextIntent(mainIntent)
+                    stackBuilder.addNextIntent(callIntent)
+                    stackBuilder.startActivities()
+
                     finish()
                 }
 
@@ -227,7 +260,8 @@ class IncomingCallActivity : AppCompatActivity() {
 
     // ------------------- Video Accept -------------------
     private fun handleVideoAccept(from: String, room: String?) {
-
+        val openedFromNotification =
+            intent.getBooleanExtra("opened_from_notification", false)
         // 💥 Kill incoming notification here also!!!
         try {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -267,18 +301,38 @@ class IncomingCallActivity : AppCompatActivity() {
             }
 
             runOnUiThread {
-                val i = Intent(this, CallScreenActivity::class.java).apply {
-                    putExtra("start_timer_now", true)
-                    putExtra("call_mode", "APP_VIDEO")
-                    putExtra("display_name", from)
-                    putExtra("room_name", roomName)
-                    putExtra("access_token", token)
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                }
+                if (!openedFromNotification) {
+                    val callIntent = Intent(this, CallScreenActivity::class.java).apply {
+                        putExtra("start_timer_now", true)
+                        putExtra("call_mode", "APP_VIDEO")
+                        putExtra("display_name", from)
+                        putExtra("room_name", roomName)
+                        putExtra("access_token", token)
+                    }
 
-                startActivity(i)
-                finish()
+                    val mainIntent = Intent(this, MainActivity::class.java)
+
+                    val stackBuilder = android.app.TaskStackBuilder.create(this)
+                    stackBuilder.addNextIntent(mainIntent)
+                    stackBuilder.addNextIntent(callIntent)
+                    stackBuilder.startActivities()
+
+                    finish()
+                }
             }
+        }
+    }
+
+
+    private val closeUiReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+
+            finish()
+        }
+    }
+    private val stopRingReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+
         }
     }
 
@@ -429,41 +483,17 @@ class IncomingCallActivity : AppCompatActivity() {
         }
     }
 
-    private fun startRingtoneAndVibration() {
-        try {
-            ringtonePlayer = MediaPlayer.create(this, android.provider.Settings.System.DEFAULT_RINGTONE_URI)
-            ringtonePlayer?.isLooping = true
-            ringtonePlayer?.start()
 
-            vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-            val pattern = longArrayOf(0, 1000, 1000)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                vibrator?.vibrate(VibrationEffect.createWaveform(pattern, 0))
-            } else {
-                @Suppress("DEPRECATION")
-                vibrator?.vibrate(pattern, 0)
-            }
-        } catch (e: Exception) {
-            Log.e("IncomingCall", "Failed to start ringtone/vibration: ${e.message}")
-        }
-    }
-
-    private fun stopRingtoneAndVibration() {
-        try {
-            ringtonePlayer?.stop()
-            ringtonePlayer?.release()
-            ringtonePlayer = null
-            vibrator?.cancel()
-        } catch (_: Exception) {}
-    }
 
     override fun onDestroy() {
-        stopRingtoneAndVibration()
+
+        try { unregisterReceiver(stopRingReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(closeUiReceiver) } catch (_: Exception) {}
         super.onDestroy()
     }
 
     override fun onBackPressed() {
-        stopRingtoneAndVibration()
+
         try {
             IncomingCallHolder.invite?.reject(this)
         } catch (_: Exception) {}

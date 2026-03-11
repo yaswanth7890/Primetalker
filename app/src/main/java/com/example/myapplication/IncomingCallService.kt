@@ -4,8 +4,10 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.media.AudioManager
 import android.media.MediaPlayer
 import android.os.Build
 import android.os.IBinder
@@ -27,7 +29,9 @@ class IncomingCallService : Service() {
         val caller = intent?.getStringExtra("from") ?: "Unknown"
         val isVideo = intent?.getBooleanExtra("kind", false) ?: false
 
-        startForeground(9002, buildNotification(caller, isVideo))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForeground(9002, buildSilentNotification())
+        }
 
         startRingtone()
         startVibration()
@@ -42,6 +46,18 @@ class IncomingCallService : Service() {
             .setContentText(caller)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setOngoing(true)
+            .build()
+    }
+
+    private fun buildSilentNotification(): Notification {
+        return NotificationCompat.Builder(this, "incoming_call_channel")
+            .setSmallIcon(R.drawable.call_img)
+            .setContentTitle("")
+            .setContentText("")
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setSilent(true)
             .setOngoing(true)
             .build()
     }
@@ -64,10 +80,21 @@ class IncomingCallService : Service() {
 
     private fun startRingtone() {
         try {
-            ringtone = MediaPlayer.create(this, android.provider.Settings.System.DEFAULT_RINGTONE_URI)
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+            audioManager.mode = AudioManager.MODE_NORMAL
+            audioManager.isSpeakerphoneOn = false
+
+            ringtone = MediaPlayer()
+            ringtone?.setAudioStreamType(AudioManager.STREAM_RING)
+            ringtone?.setDataSource(this, android.provider.Settings.System.DEFAULT_RINGTONE_URI)
             ringtone?.isLooping = true
+            ringtone?.prepare()
             ringtone?.start()
-        } catch (_: Exception) {}
+
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     private fun startVibration() {
