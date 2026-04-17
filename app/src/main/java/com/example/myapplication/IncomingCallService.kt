@@ -26,11 +26,20 @@ class IncomingCallService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+
+
+
         val caller = intent?.getStringExtra("from") ?: "Unknown"
         val isVideo = intent?.getBooleanExtra("kind", false) ?: false
 
+        // 🔥 MUST start foreground immediately (Android 12+ requirement)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForeground(9002, buildSilentNotification())
+            startForeground(9002, buildNotification(caller, isVideo))
+        }
+
+        if (CallStateManager.state != CallStateManager.State.INCOMING){
+            stopSelf()
+            return START_NOT_STICKY
         }
 
         startRingtone()
@@ -50,17 +59,7 @@ class IncomingCallService : Service() {
             .build()
     }
 
-    private fun buildSilentNotification(): Notification {
-        return NotificationCompat.Builder(this, "incoming_call_channel")
-            .setSmallIcon(R.drawable.call_img)
-            .setContentTitle("")
-            .setContentText("")
-            .setPriority(NotificationCompat.PRIORITY_MIN)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .setSilent(true)
-            .setOngoing(true)
-            .build()
-    }
+
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

@@ -1,6 +1,7 @@
 package com.example.myapplication
 
 
+import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -29,6 +30,7 @@ import org.json.JSONObject
 import java.io.IOException
 import android.media.AudioFormat
 import android.media.AudioManager
+import android.os.PowerManager
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import com.example.myapplication.db.DbProvider
@@ -113,35 +115,25 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
 
 
     override fun onMessageReceived(msg: RemoteMessage) {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val wl = pm.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "myapp:FCM_WAKE"
+        )
+        wl.acquire(10*1000L)
         val data = msg.data ?: return
         Log.d("FCM", "🔥 Incoming FCM data: $data")
 
-
-
+// 🔥 STORE REAL CALLER FROM FCM
+        if (data["caller_id"] != null) {
+            IncomingCallHolder.callerId = data["caller_id"]
+        }
         // Try to let Twilio parse the payload so we can obtain CallInvite object if present.
         try {
             Voice.handleMessage(this, data, object : MessageListener {
                 override fun onCallInvite(callInvite: CallInvite) {
-                    Log.d("Twilio", "📞 CallInvite parsed by SDK from: ${callInvite.from}")
-                    // Save invite for later accept/reject
-                    IncomingCallHolder.invite = callInvite
-
-                    // 🔥 Also store in service backup (for killed app case)
-                    val svcIntent = Intent(
-                        this@MyFirebaseMessagingService,
-                        CallNotificationService::class.java
-                    ).apply {
-                        action = CallNotificationService.ACTION_STORE_INVITE
-                        putExtra("invite", callInvite)
-                    }
-
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                        this@MyFirebaseMessagingService.startForegroundService(svcIntent)
-                    else
-                        this@MyFirebaseMessagingService.startService(svcIntent)
-
-                    // ❌ DO NOT open UI here
-                    Log.d("Twilio", "CallInvite received, waiting for FCM UI trigger")
+                    Log.d("Twilio", "Invite → CallStateManager")
+                    CallStateManager.onIncomingInvite(applicationContext, callInvite)
                 }
 
                 override fun onCancelledCallInvite(cancelledCallInvite: CancelledCallInvite, callException: CallException?) {
@@ -159,21 +151,53 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
         // Regardless of above, also support your server-defined custom payloads
         when (data["type"]) {
             "VIDEO_INVITE" -> {
-                val from = deriveDisplayNameFromPayload(data, data["caller_display"] ?: data["caller_id"] ?: "Unknown")
+
+                if (CallStateManager.state != CallStateManager.State.IDLE ||
+                    CallStateManager.isCallEnded) {
+
+                    Log.e("CALL_FIX", "🚫 Ignoring VIDEO_INVITE — already ended or busy")
+                    return
+                }
+
+                val from = deriveDisplayNameFromPayload(
+                    data,
+                    data["caller_display"] ?: data["caller_id"] ?: "Unknown"
+                )
+
                 val room = data["room"] ?: ""
-                showIncomingActivity(kind = "VIDEO", from = from, room = room)
+
+                showIncomingActivity(
+                    kind = "VIDEO",
+                    from = from,
+                    room = room,
+                    token = data["token"]
+                )
             }
 
-            "VOICE_INVITE" -> {
-                // fallback path in case server sends a custom voice invite rather than Twilio format
-                val from = deriveDisplayNameFromPayload(data, data["caller_display"] ?: data["caller_id"] ?: "Unknown")
-                showIncomingActivity(kind = "VOICE", from = from, room = null)
+
+
+            "USER_BUSY" -> {
+
+                Log.d("FCM","USER_BUSY received")
+
+                try {
+                    CallStateManager.endCall(applicationContext)
+                } catch (_: Exception) {}
+
+                stopService(Intent(this, IncomingCallService::class.java))
+
+                val busyIntent = Intent("ACTION_USER_BUSY").apply {
+                    `package` = packageName
+                }
+
+                sendBroadcast(busyIntent)
             }
 
             "END_CALL" -> {
-                Log.d("FCM", "📴 Received END_CALL push — closing any active call UI")
-                val closeIntent = Intent("ACTION_FORCE_END_CALL").apply { `package` = packageName }
-                sendBroadcast(closeIntent)
+
+                Log.d("FCM","🔥 END_CALL received")
+
+                CallStateManager.endCall(applicationContext)
             }
 
             "CALLEE_ANSWERED" -> {
@@ -311,6 +335,7 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
                 Log.d("FCM", "ℹ️ Ignored unsupported/other FCM type: ${data["type"]}")
             }
         }
+        wl.release()
     }
 
 
@@ -335,7 +360,41 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
         })
     }
 
+    private fun notifyBusyToServer(caller: String) {
 
+        try {
+
+            val prefs = getSharedPreferences("app_prefs", MODE_PRIVATE)
+
+            val myIdentity = prefs.getString("identity", "")!!
+                .replace("[^0-9]".toRegex(), "")
+
+            val callerDigits = caller
+                .replace("client:", "")
+                .replace("[^0-9]".toRegex(), "")
+
+            val json = JSONObject().apply {
+                put("fromIdentity", myIdentity)
+                put("toIdentity", callerDigits)
+            }
+
+            val body = json.toString()
+                .toRequestBody("application/json".toMediaType())
+
+            val req = Request.Builder()
+                .url("$BASE_URL/busy-call")
+                .post(body)
+                .build()
+
+            OkHttpClient().newCall(req).enqueue(object: Callback {
+                override fun onFailure(call: Call, e: IOException) {}
+                override fun onResponse(call: Call, response: Response) {}
+            })
+
+        } catch (e: Exception) {
+            Log.e("FCM","Busy notify failed: ${e.message}")
+        }
+    }
 
     private fun deriveDisplayNameFromPayload(data: Map<String,String>, fallback: String): String {
         // 1) If server supplied a caller_display field, use it (preferred)
@@ -369,9 +428,19 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
     }
 
 
-    private fun showIncomingActivity(kind: String, from: String, room: String?) {
+    private fun showIncomingActivity(kind: String, from: String, room: String?,token:String?) {
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+        val isScreenLocked = keyguardManager.isKeyguardLocked
         val isForeground = AppVisibility.isForeground(this)
+// ADD THIS
+        if (CallStateManager.state != CallStateManager.State.IDLE) {
+            Log.e("CALL_FIX", "🚫 Blocking incoming UI — not idle")
+            return
+        }
 
+        CallStateManager.state = CallStateManager.State.INCOMING
+        CallStateManager.isVideoCall = true
+        CallStateManager.caller = from
 
         // -------------------- ALWAYS show notification --------------------
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -392,11 +461,16 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
             nm.createNotificationChannel(ch)
         }
 
+
         // PendingIntent to open IncomingCallActivity
         val openUI = Intent(this, IncomingCallActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             putExtra("incoming_type", kind)
-            putExtra("from", from)
+            val cleanNumber = from
+                .replace("client:", "")
+                .replace("[^0-9]".toRegex(), "")
+
+            putExtra("from", cleanNumber)
             room?.let { putExtra("room", it) }
         }
 
@@ -417,14 +491,18 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val acceptIntent = Intent(this, CallScreenActivity::class.java).apply {
-            action = "ACTION_ACCEPT_FROM_NOTIFICATION"
-            putExtra("call_mode", CallMode.PSTN_AUDIO.name)
-            putExtra("display_name", from)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+
+
+        val acceptIntent = Intent(this, CallNotificationService::class.java).apply {
+            action = CallNotificationService.ACTION_ACCEPT
+
+            putExtra("caller", from)
+            putExtra("isVideo", kind == "VIDEO")
+            putExtra("room_name", room)
+            putExtra("access_token", token)
         }
 
-        val acceptPendingIntent = PendingIntent.getActivity(
+        val acceptPendingIntent = PendingIntent.getService(
             this,
             1001,
             acceptIntent,
@@ -439,7 +517,7 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
             else
                 PhoneUtils.formatInternational(from)
 
-        val notification = NotificationCompat.Builder(this, channelId)
+        val builder = NotificationCompat.Builder(this, channelId)
             .setSmallIcon(R.drawable.call_img)
             .setContentTitle(if (kind == "VIDEO") "Incoming Video Call" else "Incoming Voice Call")
             .setContentText(displayText)
@@ -448,19 +526,34 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
             .setAutoCancel(false)
             .setOngoing(false)
             .setDefaults(NotificationCompat.DEFAULT_ALL)
-            .setFullScreenIntent(openPendingIntent, true)
+            .setContentIntent(openPendingIntent)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Reject", rejectPI)
             .addAction(android.R.drawable.ic_menu_call, "Accept", acceptPendingIntent)
-            .setContentIntent(openPendingIntent)   // <--- clicking anywhere opens UI
-            .build()
 
+// ✅ ONLY when locked
+        if (isScreenLocked) {
+            builder.setFullScreenIntent(openPendingIntent, true)
+        }
+
+        val notification = builder.build()
         nm.notify(9999, notification)
+
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val wl = pm.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "myapp:CALL_WAKE"
+        )
+        wl.acquire(3000)
 
 
 // 🔥 Start ringtone service safely
         try {
             val ringIntent = Intent(this, IncomingCallService::class.java).apply {
-                putExtra("from", from)
+                val cleanNumber = from
+                    .replace("client:", "")
+                    .replace("[^0-9]".toRegex(), "")
+
+                putExtra("from", cleanNumber)
                 putExtra("kind", kind == "VIDEO")
             }
 
@@ -474,9 +567,12 @@ class MyFirebaseMessagingService : FirebaseMessagingService() {
             Log.e("FCM", "Failed to start IncomingCallService: ${e.message}")
         }
 
-        // -------------------- OPEN UI ONLY IF APP IS FOREGROUND --------------------
-        if (isForeground) {
+
+        // 🔥 ALWAYS OPEN UI (lock screen + foreground)
+        try {
             startActivity(openUI)
+        } catch (e: Exception) {
+            Log.e("FCM", "Failed to launch IncomingCallActivity: ${e.message}")
         }
     }
 

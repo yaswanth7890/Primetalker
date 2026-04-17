@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.os.CountDownTimer
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.widget.Button
@@ -242,7 +244,10 @@ class LoginActivity : AppCompatActivity() {
         val exp = prefs.getLong("access_expiry_epoch", 0L)
 
         if (!access.isNullOrEmpty() && System.currentTimeMillis() < exp) {
-            openMainActivity(); return true
+            Handler(Looper.getMainLooper()).postDelayed({
+                openMainActivity()
+            }, 700)
+            return true
         }
 
         if (!refresh.isNullOrEmpty()) {
@@ -265,7 +270,9 @@ class LoginActivity : AppCompatActivity() {
                             System.currentTimeMillis() + mins * 60_000L
                         )
                         .apply()
-                    openMainActivity()
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        openMainActivity()
+                    }, 700)
                 }
             }
             return false

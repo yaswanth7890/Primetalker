@@ -115,32 +115,36 @@ class CallScreenActivity : AppCompatActivity() {
 
     companion object {
         var isActive = false
+        var isRunning = false
     }
 
     // Broadcast receivers
     private val endCallReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+
             if (intent?.action != "ACTION_FORCE_END_CALL") return
-            if (!isActive) {
-                Log.d(TAG, "Ignoring END_CALL broadcast — UI not active")
-                return
+
+            Log.d("CALL_FIX", "🔥 FORCE END RECEIVED IN UI")
+
+            runOnUiThread {
+                finishCallGracefully()   // 🔥 THIS IS THE REAL FIX
             }
-            // If we are still ringing, ignore remote END_CALL (server will notify after connect usually)
-            if (::txtCallTimer.isInitialized &&
-                txtCallTimer.text.toString().contains("Ringing", true)
-            ) {
-                Log.w(TAG, "END_CALL received while ringing — ignoring")
-                return
-            }
-            Log.d(TAG, "Received END_CALL broadcast — finishing call")
-            finishCallGracefully()
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+
     }
 
     private val calleeAnsweredReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             Log.d(TAG, "CALLEE_ANSWERED broadcast received — starting timer")
-            beginTimerSafely()
+
+            if (mode == CallMode.APP_VIDEO) {
+                return // ❌ IGNORE for video
+            }
+
             CallNotificationService.startOngoing(this@CallScreenActivity, txtCallerName.text.toString(), mode == CallMode.APP_VIDEO)
         }
     }
@@ -153,32 +157,30 @@ class CallScreenActivity : AppCompatActivity() {
     // Twilio Video listeners
     private val roomListener = object : Room.Listener {
         override fun onConnected(room: Room) {
+            CallStateManager.state = CallStateManager.State.VIDEO_CONNECTED
 
             runOnUiThread {
                 Log.d(TAG, "Video room connected")
-                txtCallTimer.text = "Ringing…"
-            }
-            // Wait for remote participant to start timer
-            room.remoteParticipants.firstOrNull()?.let { participant ->
-                attachRemoteListener(participant, remoteListener)
-                runOnUiThread {
-                    if (timer == null) {
-                        txtCallTimer.text = "00:00"
-                        startTimer()
-                        CallNotificationService.startOngoing(this@CallScreenActivity, txtCallerName.text.toString(), true)
-                    }
+
+                // 🔥 FIX: Attach existing participants (callee side fix)
+                for (participant in room.remoteParticipants) {
+                    attachRemoteListener(participant, remoteListener)
                 }
+
+                startTimerIfNeeded()
+
+                CallNotificationService.startOngoing(
+                    this@CallScreenActivity,
+                    txtCallerName.text.toString(),
+                    true
+                )
             }
         }
 
         override fun onParticipantConnected(room: Room, participant: RemoteParticipant) {
             attachRemoteListener(participant, remoteListener)
             runOnUiThread {
-                if (timer == null) {
-                    txtCallTimer.text = "00:00"
-                    startTimer()
-                    CallNotificationService.startOngoing(this@CallScreenActivity, txtCallerName.text.toString(), true)
-                }
+
             }
         }
 
@@ -191,10 +193,14 @@ class CallScreenActivity : AppCompatActivity() {
 
         override fun onDisconnected(room: Room, e: TwilioException?) {
             runOnUiThread {
+                finishCallGracefully()   // 🔥 FIRST
                 stopTimer()
-                finishCallGracefully()
+                CallNotificationService.stopService(this@CallScreenActivity)
+                CallStateManager.endCall(this@CallScreenActivity)
             }
         }
+
+
 
         override fun onRecordingStarted(room: Room) {}
         override fun onRecordingStopped(room: Room) {}
@@ -241,18 +247,28 @@ class CallScreenActivity : AppCompatActivity() {
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        CallHolder.callEnded = false
+// 🔥 prevent duplicate call screens
+
+
 
         try {
             stopService(Intent(this, IncomingCallService::class.java))
         } catch (_: Exception) {}
 
-        super.onCreate(savedInstanceState)
-        isActive = true
         setContentView(R.layout.activity_call_screen)
+
+        CallHolder.captionHistory.clear()
 
 
         if (intent?.action == "ACTION_ACCEPT_FROM_NOTIFICATION") {
-            acceptInviteDirectly()
+
+            if (mode == CallMode.PSTN_AUDIO) {
+                acceptInviteDirectly()
+            }
+
+            // ❌ DO NOTHING FOR VIDEO
         }
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
@@ -261,25 +277,73 @@ class CallScreenActivity : AppCompatActivity() {
         restoreCaptions()
 
 // 🔥 Restore timer from service if call already running
-        if (CallHolder.activeCall != null) {
+        if (CallStateManager.currentCall != null) {
             elapsed = CallNotificationService.globalSeconds
             txtCallTimer.text = String.format("%02d:%02d", elapsed / 60, elapsed % 60)
         }
         val rawNumber =
-            intent.getStringExtra("display_name")
-                ?: CallHolder.callerDisplayName
+            CallHolder.callerDisplayName
+                ?: CallStateManager.caller
+                ?: intent.getStringExtra("display_name")
                 ?: "Unknown"
-
-        val contactName = PhoneUtils.getContactName(this, rawNumber)
+        val cleanedNumber = rawNumber
+            .replace("client:", "")
+            .replace("[^0-9]".toRegex(), "")
+            .let { "+$it" }
+        val contactName = PhoneUtils.getContactName(this, cleanedNumber)
 
         txtCallerName.text =
-            if (contactName != null)
-                "$contactName\n${PhoneUtils.formatInternational(rawNumber)}"
+            if (!contactName.isNullOrEmpty())
+                "$contactName\n${PhoneUtils.formatInternational(cleanedNumber)}"
             else
-                PhoneUtils.formatInternational(rawNumber)
+                PhoneUtils.formatInternational(cleanedNumber)
         mode = CallMode.valueOf(intent.getStringExtra("call_mode") ?: CallMode.PSTN_AUDIO.name)
+        // 🔥 FIX: FORCE VIDEO CONNECT WHEN OPENED FROM NOTIFICATION
+        if (mode == CallMode.APP_VIDEO) {
 
-        btnEndCall.setOnClickListener { finishCallGracefully() }
+            val roomName = intent.getStringExtra("room_name")
+            val token = intent.getStringExtra("access_token")
+
+            Log.d("CALL_FIX", "Opening video from notification: room=$roomName")
+
+            if (!roomName.isNullOrEmpty() && !token.isNullOrEmpty()) {
+
+                // 🔥 Ensure clean state before connecting
+                CallStateManager.isVideoCall = true
+                CallStateManager.videoRoom = roomName
+                CallStateManager.videoToken = token
+
+            }
+        }
+        val showBusy = intent.getBooleanExtra("show_busy", false)
+
+        if (showBusy) {
+
+            txtCallTimer.text = "User Busy"
+
+            btnEndCall.setOnClickListener {
+                finish()
+            }
+
+            Handler(Looper.getMainLooper()).postDelayed({
+                finish()
+            }, 30000)
+
+            return
+        }
+        btnEndCall.setOnClickListener {
+
+            Log.d("CALL_FIX", "🔴 USER PRESSED END")
+
+            // 🔥 1. Kill video immediately
+            finishCallGracefully()
+
+            // 🔥 2. Notify system
+            CallStateManager.endCall(this)
+
+            // 🔥 3. Notify backend
+            notifyBackendEndCallSafely()
+        }
 
         btnSpeaker.setOnClickListener { toggleSpeaker() }
         btnMute.setOnClickListener { toggleMute() }
@@ -296,17 +360,17 @@ class CallScreenActivity : AppCompatActivity() {
         registerSafeReceiver(endCallReceiver, "ACTION_FORCE_END_CALL")
         registerSafeReceiver(calleeAnsweredReceiver, "ACTION_CALLEE_ANSWERED")
         registerSafeReceiver(captionReceiver, "ACTION_LIVE_CAPTION")
+        registerSafeReceiver(userBusyReceiver, "ACTION_USER_BUSY")
+        registerSafeReceiver(videoEndReceiver, "ACTION_END_VIDEO_CALL")
+        Handler(Looper.getMainLooper()).post(object : Runnable {
+            override fun run() {
+                val sec = CallNotificationService.globalSeconds
+                txtCallTimer.text = String.format("%02d:%02d", sec / 60, sec % 60)
+                Handler(Looper.getMainLooper()).postDelayed(this, 1000)
+            }
+        })
 
 
-
-
-        // If the activity asked to start the timer now
-        if (intent.getBooleanExtra("start_timer_now", false)) {
-            Handler(Looper.getMainLooper()).postDelayed({
-                beginTimerSafely()
-                CallNotificationService.startOngoing(this, txtCallerName.text.toString(), mode == CallMode.APP_VIDEO)
-            }, 700)
-        }
 
         // Handle immediate force_end request (rare)
         if (intent.getBooleanExtra("force_end", false)) {
@@ -317,7 +381,11 @@ class CallScreenActivity : AppCompatActivity() {
         if (mode == CallMode.PSTN_AUDIO) {
             setupForPstnAudio()
         } else {
-            setupForAppVideo()
+
+            // 🔥 EXTRA SAFETY FOR NOTIFICATION FLOW
+            Handler(Looper.getMainLooper()).post {
+                setupForAppVideo()
+            }
         }
     }
 
@@ -336,48 +404,17 @@ class CallScreenActivity : AppCompatActivity() {
     }
     private fun acceptInviteDirectly() {
 
-        val invite = IncomingCallHolder.invite
-            ?: return
-// HARD STOP ALL RING + VIBRATION
-        try {
-            stopService(Intent(this, IncomingCallService::class.java))
-        } catch (_: Exception) {}
+        Log.d("CALL_FLOW", "🔥 Accept from notification (activity)")
 
-        try {
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.cancel(CallNotificationService.INCOMING_CALL_NOTIFICATION_ID)
-        } catch (_: Exception) {}
+        // 🔥 VERY IMPORTANT: accept BEFORE UI logic
+        CallStateManager.acceptCall(applicationContext)
 
-        // Force cancel notification channel vibration
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.getNotificationChannel("incoming_call_channel")?.let {
-                it.enableVibration(false)
-                nm.createNotificationChannel(it)
-            }
-        }
-
-        invite.accept(this, object : com.twilio.voice.Call.Listener {
-
-            override fun onConnected(call: com.twilio.voice.Call) {
-                CallHolder.activeCall = call
-                IncomingCallHolder.invite = null
-                startTimerIfNeeded()
-
-            }
-
-            override fun onConnectFailure(call: com.twilio.voice.Call, e: com.twilio.voice.CallException) {
-                finish()
-            }
-
-            override fun onDisconnected(call: com.twilio.voice.Call, e: com.twilio.voice.CallException?) {
-                finish()
-            }
-
-            override fun onReconnecting(call: com.twilio.voice.Call, e: com.twilio.voice.CallException) {}
-            override fun onReconnected(call: com.twilio.voice.Call) {}
-            override fun onRinging(call: com.twilio.voice.Call) {}
-        })
+        // optional: start ongoing notif early
+        CallNotificationService.startOngoing(
+            applicationContext,
+            intent.getStringExtra("display_name") ?: "Call",
+            false
+        )
     }
 
 
@@ -455,10 +492,10 @@ class CallScreenActivity : AppCompatActivity() {
         }
         showVideo(false)
         txtCallTimer.text = "Ringing…"
-        voiceCall = CallHolder.activeCall
+        voiceCall = CallStateManager.currentCall
         Log.d(TAG, "ActiveCall state: ${voiceCall?.state}")
 
-        voiceCall = CallHolder.activeCall
+
 
         if (voiceCall == null) {
             txtCallTimer.text = "Connecting..."
@@ -473,6 +510,7 @@ class CallScreenActivity : AppCompatActivity() {
             }
 
             override fun onConnected(call: VoiceCall) {
+                CallHolder.callEnded = false
                 CallHolder.isSpeakerOn = false
                 CallHolder.isMuted = false
                 setAudioMode(true)
@@ -510,6 +548,7 @@ class CallScreenActivity : AppCompatActivity() {
 
                 runOnUiThread {
                     stopTimer()
+                    CallNotificationService.stopService(this@CallScreenActivity)
                     finishCallGracefully()
                 }
             }
@@ -531,7 +570,7 @@ class CallScreenActivity : AppCompatActivity() {
         handler.post(object : Runnable {
             override fun run() {
                 try {
-                    val state = CallHolder.activeCall?.state
+                    val state = CallStateManager.currentCall?.state
                     if (state == VoiceCall.State.CONNECTED) {
                         startTimerIfNeeded()
                         return
@@ -550,6 +589,11 @@ class CallScreenActivity : AppCompatActivity() {
 
     // Video
     private fun setupForAppVideo() {
+        if (CallStateManager.isCallEnded) {
+            Log.e("CALL_FIX", "🚫 Preventing video setup — call already ended")
+            finish()
+            return
+        }
         if (!checkPermissions()) return
         val token = intent.getStringExtra("access_token")
         val roomName = intent.getStringExtra("room_name")
@@ -568,6 +612,7 @@ class CallScreenActivity : AppCompatActivity() {
         videoCapturer = buildCamera2Capturer()
         localVideo = LocalVideoTrack.create(this, true, videoCapturer!!)
         localAudio = LocalAudioTrack.create(this, true)
+        CallStateManager.localAudioTrack = localAudio
         localVideo?.addSink(localVideoView)
 
         val options = ConnectOptions.Builder(token)
@@ -577,7 +622,7 @@ class CallScreenActivity : AppCompatActivity() {
             .build()
 
         room = Video.connect(this, options, roomListener)
-        CallNotificationService.startOngoing(this, txtCallerName.text.toString(), true)
+
     }
 
     private fun buildCamera2Capturer(): VideoCapturer {
@@ -624,14 +669,9 @@ class CallScreenActivity : AppCompatActivity() {
     private fun startTimerIfNeeded() {
         if (timer != null) return
 
-        // 🔥 DO NOT RESET IF ALREADY COUNTING
-        if (elapsed == 0L) {
-            txtCallTimer.text = "00:00"
-        } else {
-            txtCallTimer.text = String.format("%02d:%02d", elapsed / 60, elapsed % 60)
-        }
 
-        startTimer()
+
+
 
         setAudioMode(true)
         updateSpeakerIcon()
@@ -644,33 +684,7 @@ class CallScreenActivity : AppCompatActivity() {
     }
 
 
-    private fun startTimer() {
-        if (timer != null) return
 
-        timer?.cancel()
-        timer = object : CountDownTimer(Long.MAX_VALUE, 1000) {
-            override fun onTick(ms: Long) {
-                elapsed++
-                txtCallTimer.text = String.format("%02d:%02d", elapsed / 60, elapsed % 60)
-
-                if (elapsed % 3L == 0L) {
-                    val syncIntent = Intent(this@CallScreenActivity, CallNotificationService::class.java).apply {
-                        action = "com.example.myapplication.ACTION_SYNC_SECONDS"
-                        putExtra("elapsed", elapsed)
-                        putExtra("caller", txtCallerName.text.toString())
-                        putExtra("isVideo", mode == CallMode.APP_VIDEO)
-                    }
-
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-                        startForegroundService(syncIntent)
-                    else
-                        startService(syncIntent)
-                }
-            }
-
-            override fun onFinish() {}
-        }.start()
-    }
 
     private fun stopTimer() {
         timer?.cancel()
@@ -688,7 +702,7 @@ class CallScreenActivity : AppCompatActivity() {
                 txtCallTimer.text =
                     String.format("%02d:%02d", elapsed / 60, elapsed % 60)
 
-                startTimer()
+
             }
         }
     }
@@ -754,12 +768,22 @@ class CallScreenActivity : AppCompatActivity() {
         CallHolder.isMuted = !CallHolder.isMuted
 
         try {
+            // 🔥 AUDIO CALL (Twilio Voice)
             voiceCall?.mute(CallHolder.isMuted)
+
+            // 🔥 VIDEO CALL (Twilio Video)
+            localAudio?.enable(!CallHolder.isMuted)
+
+            // 🔥 SYSTEM LEVEL (extra safety)
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.isMicrophoneMute = CallHolder.isMuted
+
         } catch (e: Exception) {
             Log.e(TAG, "Mute failed: ${e.message}")
         }
 
         updateMuteIcon()
+
         val intent = Intent(CallNotificationService.ACTION_SYNC_UI)
         intent.setPackage(packageName)
         sendBroadcast(intent)
@@ -822,27 +846,16 @@ class CallScreenActivity : AppCompatActivity() {
 
         if (inCall) {
             am.mode = AudioManager.MODE_IN_COMMUNICATION
-
-            CallHolder.isSpeakerOn = false
-            CallHolder.isMuted = false
+            am.isMicrophoneMute = false
+        } else {
+            // 🔥 RESET EVERYTHING (THIS FIXES GREEN DOT)
+            am.mode = AudioManager.MODE_NORMAL
+            am.isMicrophoneMute = false
+            am.isSpeakerphoneOn = false
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-
-                val earpiece = am.availableCommunicationDevices.firstOrNull {
-                    it.type == android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
-                }
-
-                if (earpiece != null) {
-                    am.setCommunicationDevice(earpiece)
-                } else {
-                    am.clearCommunicationDevice()
-                }
-
-            } else {
-                am.isSpeakerphoneOn = false
+                am.clearCommunicationDevice()
             }
-
-            am.isMicrophoneMute = false
         }
     }
 
@@ -947,36 +960,116 @@ class CallScreenActivity : AppCompatActivity() {
     }
 
 
+    private val userBusyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
 
+            runOnUiThread {
+
+                txtCallTimer.text = "User Busy"
+
+                Handler(Looper.getMainLooper()).postDelayed({
+                    finishCallGracefully()
+                }, 3000)
+            }
+
+        }
+    }
     // finish call - safe & graceful
     private fun finishCallGracefully() {
+        if (CallHolder.callEnded && CallHolder.activeCall == null) {
+            return
+        }
+
+        // 🔥 DO NOT BLOCK VIDEO CLEANUP
+        if (mode == CallMode.PSTN_AUDIO && CallStateManager.currentCall == null) {
+            finish()
+            return
+        }
+
+        CallStateManager.videoRoom = null
+        CallStateManager.videoToken = null
+        CallStateManager.isVideoCall = false
+        CallStateManager.state = CallStateManager.State.IDLE
         try {
-            // Avoid ending during ringing (server side may want to continue)
-            if (::txtCallTimer.isInitialized && txtCallTimer.text.toString().contains("Ringing", true)) {
-                Log.w(TAG, "Ignoring finishCall while ringing")
-                return
+
+            // ✅ STEP 1: Unpublish FIRST (IMPORTANT)
+            try {
+                room?.localParticipant?.let { participant ->
+                    localVideo?.let { participant.unpublishTrack(it) }
+                    localAudio?.let { participant.unpublishTrack(it) }
+                }
+            } catch (_: Exception) {}
+// 🔥 STEP 0: HARD STOP MEDIA FIRST (THIS IS WHAT YOU MISSED)
+            try {
+                Log.d("CALL_FIX", "🛑 Stopping local tracks")
+
+                // STEP 1: disable
+                localAudio?.enable(false)
+                localVideo?.enable(false)
+
+// STEP 2: unpublish
+                room?.localParticipant?.let {
+                    localVideo?.let { v -> it.unpublishTrack(v) }
+                    localAudio?.let { a -> it.unpublishTrack(a) }
+                }
+
+// STEP 3: disconnect
+                room?.disconnect()
+
+// STEP 4: release ONCE
+                localVideo?.release()
+                localAudio?.release()
+
+
+                localAudio = null
+                localVideo = null
+
+            } catch (e: Exception) {
+                Log.e("CALL_FIX", "Track stop failed: ${e.message}")
             }
+            // ✅ STEP 2: Disconnect AFTER
+            try {
+                room?.disconnect()
+            } catch (_: Exception) {}
 
-
-            CallHolder.activeCall?.let {
-
-                try { it.disconnect() } catch (e: Exception) { Log.w(TAG, "disconnect error: ${e.message}") }
-            }
-            CallHolder.activeCall = null
-
-            room?.let { try { it.disconnect() } catch (_: Exception) {} }
             room = null
 
-            try { localVideo?.release() } catch (_: Exception) {}
-            try { localAudio?.release() } catch (_: Exception) {}
-            localVideo = null; localAudio = null
+            // ✅ STEP 3: Release tracks
+            try {
+                localVideo?.release()
+                localAudio?.release()
+            } catch (_: Exception) {}
 
-            // Notify backend END_CALL
-            notifyBackendEndCallSafely()
-            CallHolder.isOutgoing = false
+            localVideo = null
+            localAudio = null
+
+            // ✅ STEP 4: Stop & dispose camera (VERY IMPORTANT)
+            try {
+                Log.d("CALL_FIX", "📷 Stopping camera capturer")
+
+                (videoCapturer as? Camera2Capturer)?.let { capturer ->
+                    capturer.stopCapture()
+                    capturer.dispose()
+                }
+
+                videoCapturer = null
+
+            } catch (e: Exception) {
+                Log.e("CALL_FIX", "Camera stop failed: ${e.message}")
+            }
+
+            videoCapturer = null
+
+            // ✅ STEP 5: Release VideoViews (FIX GREEN DOT)
+            try {
+                localVideoView.visibility = View.GONE
+                remoteVideoView.visibility = View.GONE
+
+                localVideoView.release()
+                remoteVideoView.release()
+            } catch (_: Exception) {}
+
             isActive = false
-
-
 
         } catch (e: Exception) {
             Log.e(TAG, "finishCallGracefully error: ${e.message}")
@@ -995,6 +1088,7 @@ class CallScreenActivity : AppCompatActivity() {
                 }
                 CallHolder.captionHistory.clear()
                 captionList.clear()
+                captionAdapter.notifyDataSetChanged()
 
                 // 🔥 RESET TIMER FOR NEXT CALL
                 elapsed = 0L
@@ -1003,6 +1097,59 @@ class CallScreenActivity : AppCompatActivity() {
                 stopService(Intent(this, CallForegroundService::class.java))
 
             }
+        }
+        try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+            am.mode = AudioManager.MODE_NORMAL
+            am.isSpeakerphoneOn = false
+            am.isMicrophoneMute = false
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                am.clearCommunicationDevice()
+            }
+
+            // 🔥 THIS LINE WAS MISSING EFFECTIVELY
+            am.abandonAudioFocus(null)
+
+        } catch (e: Exception) {
+            Log.e("CALL_FIX", "Audio reset failed: ${e.message}")
+        }
+
+        Handler(Looper.getMainLooper()).postDelayed({
+
+            try {
+                Log.d("CALL_DEBUG", "🔥 FINAL GC CLEANUP")
+
+                System.gc()
+                System.runFinalization()
+
+            } catch (_: Exception) {}
+
+        }, 1000)
+
+        try {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+            am.mode = AudioManager.MODE_NORMAL
+            am.isMicrophoneMute = true   // 🔥 FORCE CUT MIC
+            am.isSpeakerphoneOn = false
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                am.clearCommunicationDevice()
+            }
+
+            am.abandonAudioFocus(null)
+
+        } catch (e: Exception) {
+            Log.e("CALL_FIX", "Audio hard reset failed: ${e.message}")
+        }
+    }
+
+    private val videoEndReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            Log.d("CALL_FIX", "🔥 VIDEO END RECEIVED")
+            finishCallGracefully()
         }
     }
 
@@ -1081,11 +1228,15 @@ class CallScreenActivity : AppCompatActivity() {
         try { unregisterReceiver(calleeAnsweredReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(captionReceiver) } catch (_: Exception) {}
         try { unregisterReceiver(uiSyncReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(userBusyReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(videoEndReceiver) } catch (_: Exception) {}
         isActive = false
-        CallHolder.isOutgoing = false
 
+        isRunning = false
         stopTimer()
         setAudioMode(false)
+
+
 
 
     }

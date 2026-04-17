@@ -26,7 +26,7 @@ import java.net.URLEncoder
 import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.IntentFilter
-
+import android.view.WindowManager
 
 
 class IncomingCallActivity : AppCompatActivity() {
@@ -39,7 +39,7 @@ class IncomingCallActivity : AppCompatActivity() {
 
     private var ringtonePlayer: MediaPlayer? = null
     private var vibrator: Vibrator? = null
-
+    private var isAnswering = false
     private val BASE_URL = "https://nodical-earlie-unyieldingly.ngrok-free.dev"
 
     private val PERMISSIONS_REQUEST_CODE = 123
@@ -53,12 +53,18 @@ class IncomingCallActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_incoming_call)
-
-        val directInvite = intent.getParcelableExtra<com.twilio.voice.CallInvite>("INCOMING_CALL_INVITE")
-        if (directInvite != null) {
-            Log.d("IncomingCall", "✅ Received CallInvite via Intent")
-            IncomingCallHolder.invite = directInvite
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
         }
+
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON
+        )
+
+
+
 
         // stop service ringtone if running
         try {
@@ -89,19 +95,16 @@ class IncomingCallActivity : AppCompatActivity() {
         val openedFromNotification =
             intent.getBooleanExtra("opened_from_notification", false)
 
-        // ✅ Clean up caller label (remove "client:" prefixes)
-        val rawNumber =
-            intent.getStringExtra("from")
-                ?: CallHolder.callerDisplayName
-                ?: "Unknown"
+        val number = CallStateManager.caller ?: "Unknown"
 
-        val contactName = PhoneUtils.getContactName(this, rawNumber)
+        val contactName = PhoneUtils.getContactName(this, number)
 
-        if (contactName != null) {
-            txtCallerNumber.text = "$contactName\n${PhoneUtils.formatInternational(rawNumber)}"
-        } else {
-            txtCallerNumber.text = PhoneUtils.formatInternational(rawNumber)
-        }
+        txtCallerNumber.text =
+            if (!contactName.isNullOrEmpty())
+                "$contactName\n${PhoneUtils.formatInternational(number)}"
+            else
+                PhoneUtils.formatInternational(number)
+
 
         txtCallType.text = if (type == "VIDEO") "Video Call" else "Audio Call"
 
@@ -110,33 +113,30 @@ class IncomingCallActivity : AppCompatActivity() {
         // ---------------- Reject Call ----------------
         btnRejectCall.setOnClickListener {
 
-            CallHolder.isOutgoing = false
+            // 🔥 END CALL EVERYWHERE
+            CallStateManager.endCall(this)
 
-            try {
-                IncomingCallHolder.invite?.reject(this)
-                Log.d("IncomingCall", "📞 Call rejected locally")
-            } catch (e: Exception) {
-                Log.e("IncomingCall", "❌ Reject error: ${e.message}")
-            }
-            IncomingCallHolder.invite = null
-
-            // 🔥 Notify backend so caller also ends
-            CallHolder.activeCall?.disconnect()
-            CallHolder.activeCall = null
-            notifyEndCall(from)
             finish()
         }
 
         // ---------------- Accept Call ----------------
         btnAcceptCall.setOnClickListener {
 
+            // 🔥 STOP RING SERVICE IMMEDIATELY
+            try {
+                stopService(Intent(this, IncomingCallService::class.java))
+            } catch (_: Exception) {}
+
+            val type = intent.getStringExtra("incoming_type") ?: "VOICE"
+            val from = intent.getStringExtra("from") ?: ""
+            val room = intent.getStringExtra("room")
 
             if (type == "VIDEO") {
                 handleVideoAccept(from, room)
-                return@setOnClickListener
+            } else {
+                CallStateManager.acceptCall(this)
+                finish()
             }
-
-            handleVoiceAccept()
         }
         ContextCompat.registerReceiver(
             this,
@@ -147,115 +147,7 @@ class IncomingCallActivity : AppCompatActivity() {
 
     }
 
-    // ------------------- Voice Accept -------------------
-    // ------------------- Voice Accept (Fixed) -------------------
-    private fun handleVoiceAccept() {
-        val invite = IncomingCallHolder.invite
-        if (invite == null) {
-            Toast.makeText(this, "No incoming call invite", Toast.LENGTH_SHORT).show()
-            finish()
-            return
-        }
 
-        if (!hasAllPermissionsGranted()) {
-            checkAndRequestPermissions()
-            return
-        }
-        // kill incoming notification
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.cancel(9999)
-
-// stop incoming ringtone service if running
-        try {
-            val stop = Intent(this, IncomingCallService::class.java)
-            stopService(stop)
-        } catch (_: Exception) {}
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(Intent(this, CallForegroundService::class.java))
-        } else {
-            startService(Intent(this, CallForegroundService::class.java))
-        }
-
-        // ✅ Accept immediately using Twilio’s built-in bridge token
-        invite.accept(this@IncomingCallActivity, object : Call.Listener {
-            override fun onConnected(call: Call) {
-
-                Log.d("IncomingCall", "✅ Connected successfully to Twilio Voice")
-
-                // 🔥 Remove the incoming call notification
-                try {
-                    val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                    nm.cancel(9999)
-                } catch (e: Exception) {
-                    Log.e("IncomingCall", "Failed to cancel incoming notif: ${e.message}")
-                }
-                // ✅ Notify caller via Twilio Voice "custom param"
-                try {
-                    val customParams = mapOf("answered" to "true")
-                    call.sendDigits("A") // harmless DTMF trigger for awareness
-                    Log.d("IncomingCall", "📡 Sent call acceptance ping to caller via Twilio")
-                    // ✅ Notify backend that callee answered (so caller can update UI)
-                    notifyAnswerToServer()
-
-                } catch (e: Exception) {
-                    Log.w("IncomingCall", "⚠️ Failed to send acceptance ping: ${e.message}")
-                }
-                CallHolder.activeCall = call
-                CallHolder.calleeAnswered = true
-                IncomingCallHolder.invite = null
-
-                runOnUiThread {
-                    val displayName = txtCallerNumber.text.toString()
-                        .replace("client:+", "+")
-                        .replace("client:", "")
-
-                    CallHolder.callerDisplayName = displayName
-
-
-
-
-                    // ✅ Launch CallScreenActivity with an indicator
-                    val callIntent = Intent(this@IncomingCallActivity, CallScreenActivity::class.java).apply {
-                        putExtra("call_mode", "PSTN_AUDIO")
-                        putExtra("display_name", displayName)
-                        putExtra("start_timer_now", true)
-                    }
-
-                    val mainIntent = Intent(this@IncomingCallActivity, MainActivity::class.java)
-
-                    val stackBuilder = android.app.TaskStackBuilder.create(this@IncomingCallActivity)
-                    stackBuilder.addNextIntent(mainIntent)
-                    stackBuilder.addNextIntent(callIntent)
-                    stackBuilder.startActivities()
-
-                    finish()
-                }
-
-            }
-
-            override fun onConnectFailure(call: Call, e: CallException) {
-                Log.e("IncomingCall", "❌ Connection failed: ${e.message}")
-                runOnUiThread {
-                    Toast.makeText(
-                        this@IncomingCallActivity,
-                        "Connection failed: ${e.message}",
-                        Toast.LENGTH_LONG
-                    ).show()
-                    finish()
-                }
-            }
-
-            override fun onDisconnected(call: Call, e: CallException?) {
-                Log.d("IncomingCall", "📴 Disconnected from call")
-                runOnUiThread { finish() }
-            }
-
-            override fun onReconnecting(call: Call, e: CallException) {}
-            override fun onReconnected(call: Call) {}
-            override fun onRinging(call: Call) {}
-        })
-    }
 
 
     // ------------------- Video Accept -------------------
@@ -301,24 +193,24 @@ class IncomingCallActivity : AppCompatActivity() {
             }
 
             runOnUiThread {
-                if (!openedFromNotification) {
-                    val callIntent = Intent(this, CallScreenActivity::class.java).apply {
-                        putExtra("start_timer_now", true)
-                        putExtra("call_mode", "APP_VIDEO")
-                        putExtra("display_name", from)
-                        putExtra("room_name", roomName)
-                        putExtra("access_token", token)
-                    }
 
-                    val mainIntent = Intent(this, MainActivity::class.java)
+                val callIntent = Intent(this, CallScreenActivity::class.java).apply {
+                    addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                                Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    )
 
-                    val stackBuilder = android.app.TaskStackBuilder.create(this)
-                    stackBuilder.addNextIntent(mainIntent)
-                    stackBuilder.addNextIntent(callIntent)
-                    stackBuilder.startActivities()
-
-                    finish()
+                    putExtra("start_timer_now", true)
+                    putExtra("call_mode", "APP_VIDEO")
+                    putExtra("display_name", from)
+                    putExtra("room_name", roomName)
+                    putExtra("access_token", token)
                 }
+
+                startActivity(callIntent)
+
+                finish()
             }
         }
     }
@@ -493,10 +385,7 @@ class IncomingCallActivity : AppCompatActivity() {
     }
 
     override fun onBackPressed() {
-
-        try {
-            IncomingCallHolder.invite?.reject(this)
-        } catch (_: Exception) {}
+        CallStateManager.rejectCall(this)
         finish()
         super.onBackPressed()
     }

@@ -1,8 +1,10 @@
 package com.example.myapplication
 
 import android.app.*
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.BitmapFactory
 import android.media.AudioManager
 import android.os.Build
@@ -22,6 +24,7 @@ import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import android.widget.RemoteViews
+import androidx.core.content.ContextCompat
 
 class CallNotificationService : Service() {
 
@@ -34,14 +37,14 @@ class CallNotificationService : Service() {
         const val ACTION_TOGGLE_SPEAKER = "com.example.myapplication.ACTION_TOGGLE_SPEAKER"
         const val ACTION_END = "com.example.myapplication.ACTION_END"
         const val ACTION_STOP_ALL = "com.example.myapplication.ACTION_STOP_ALL"
-
+        const val ACTION_STOP_CALL_NOTIFICATION = "com.example.myapplication.ACTION_STOP_CALL_NOTIFICATION"
         private const val ACTION_SYNC_SECONDS = "com.example.myapplication.ACTION_SYNC_SECONDS"
 
         private const val CHANNEL_ACTIVE = "active_call_channel"
         private const val NOTIF_ID_ONGOING = 9001
 
         const val INCOMING_CALL_NOTIFICATION_ID = 9999
-
+        private var actionHandled=false
         private var videoRoom: String? = null
         private var videoToken: String? = null
         var globalSeconds: Long = 0L
@@ -49,6 +52,12 @@ class CallNotificationService : Service() {
         const val ACTION_SYNC_UI = "com.example.myapplication.ACTION_SYNC_UI"
         const val ACTION_STORE_INVITE = "com.example.myapplication.ACTION_STORE_INVITE"
         fun startOngoing(context: Context, callerName: String, isVideo: Boolean) {
+
+            if (
+                CallStateManager.state != CallStateManager.State.CONNECTED &&
+                CallStateManager.state != CallStateManager.State.VIDEO_CONNECTED &&
+                CallStateManager.state != CallStateManager.State.VIDEO_OUTGOING
+            ) return
             val i = Intent(context, CallNotificationService::class.java).apply {
                 putExtra("caller", callerName)
                 putExtra("isVideo", isVideo)
@@ -96,10 +105,39 @@ class CallNotificationService : Service() {
 
     private val client = OkHttpClient()
 
+
+
     override fun onCreate() {
         super.onCreate()
         createChannels()
+        actionHandled = false
         Log.d(TAG, "Service created")
+        val channelId = "call_notifications"
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId,
+                "Call Notifications",
+                NotificationManager.IMPORTANCE_HIGH
+            )
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(channel)
+        }
+
+        val notification = NotificationCompat.Builder(this, channelId)
+            .setContentTitle("Call Service")
+            .setContentText("Running")
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+
+        startForeground(1001, notification)
+        ContextCompat.registerReceiver(
+            this,
+            stopReceiver,
+            IntentFilter(ACTION_STOP_CALL_NOTIFICATION),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -109,6 +147,8 @@ class CallNotificationService : Service() {
             ?: "Unknown"
         videoRoom = intent?.getStringExtra("room_name")
         videoToken = intent?.getStringExtra("access_token")
+        videoRoom = intent?.getStringExtra("room_name") ?: videoRoom
+        videoToken = intent?.getStringExtra("access_token") ?: videoToken
         val isVideo =
             intent?.getBooleanExtra("isVideo", false)
                 ?: (intent?.getStringExtra("incoming_type") == "VIDEO")
@@ -126,7 +166,7 @@ class CallNotificationService : Service() {
             }
             // ensure notif reflects current value
             updateOngoingNotification(caller, isVideo)
-            return START_STICKY
+            return START_NOT_STICKY
         }
 
         if (action == ACTION_STORE_INVITE) {
@@ -140,7 +180,7 @@ class CallNotificationService : Service() {
                 Log.d(TAG, "START_ONGOING: $caller")
                 startForegroundAndTimer(caller, isVideo)
                 // this must be sticky so OS restarts the service after low-memory kill
-                return START_STICKY
+                return START_NOT_STICKY
             }
 
             ACTION_ACCEPT -> {
@@ -180,18 +220,28 @@ class CallNotificationService : Service() {
         // fallback: if caller extras present, treat as start ongoing
         if (intent?.hasExtra("caller") == true) {
             startForegroundAndTimer(caller, isVideo)
-            return START_STICKY
+            return START_NOT_STICKY
         }
 
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
+
         running.set(false)
         handler.removeCallbacksAndMessages(null)
-        Log.d(TAG, "Service destroyed")
+
+        try {
+            stopForeground(true)
+        } catch (_: Exception) {}
+
+        try {
+            unregisterReceiver(stopReceiver)
+        } catch (_: Exception) {}
         super.onDestroy()
     }
+
+
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -219,10 +269,9 @@ class CallNotificationService : Service() {
         currentIsVideo = isVideo
 
 
-
-        if (secondsElapsed == 0L) {
-            secondsElapsed = globalSeconds
-        }
+        secondsElapsed = 0L
+        globalSeconds = 0L
+        latestSeconds = 0L
         running.set(true)
         handler.removeCallbacks(tick)
         handler.post(tick)
@@ -256,21 +305,33 @@ class CallNotificationService : Service() {
     }
 
     private fun stopSelfAndCancel() {
+
         running.set(false)
         handler.removeCallbacks(tick)
 
-        // 🔥 RESET ALL TIMER STATE
         secondsElapsed = 0L
         latestSeconds = 0L
         globalSeconds = 0L
 
-        val nm = getSystemService(NotificationManager::class.java)
+
+
+        CallHolder.isMuted = false
+        CallHolder.isSpeakerOn = false
+        CallHolder.callerDisplayName = null
         try {
+            val nm = getSystemService(NotificationManager::class.java)
             nm.cancel(9999)
             nm.cancel(NOTIF_ID_ONGOING)
+            nm.cancel(2001)
+        } catch (_: Exception) {}
+
+        // 🔥 STOP foreground service also
+        try {
+            stopService(Intent(this, CallForegroundService::class.java))
         } catch (_: Exception) {}
 
         stopForeground(true)
+        NotificationManagerCompat.from(this).cancelAll()
         stopSelf()
     }
 
@@ -312,25 +373,29 @@ class CallNotificationService : Service() {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 putExtra("call_mode", if (isVideo) CallMode.APP_VIDEO.name else CallMode.PSTN_AUDIO.name)
                 putExtra("display_name", caller)
-                putExtra("start_timer_now", true)
+                putExtra("start_timer_now", false)
 
             },
             PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_IMMUTABLE else 0)
         )
 
         val icon = BitmapFactory.decodeResource(resources, R.drawable.call_img)
-        val contactName = PhoneUtils.getContactName(this, caller)
+        val cleanNumber = caller
+            .replace("client:", "")
+            .replace("[^0-9]".toRegex(), "")
 
-        val displayCaller =
+        val contactName = PhoneUtils.getContactName(this, cleanNumber)
+
+        val displayName =
             if (contactName != null)
-                "$contactName\n${PhoneUtils.formatInternational(caller)}"
+                "$contactName\n${PhoneUtils.formatInternational(cleanNumber)}"
             else
-                PhoneUtils.formatInternational(caller)
+                PhoneUtils.formatInternational(cleanNumber)
         return NotificationCompat.Builder(this, CHANNEL_ACTIVE)
             .setSmallIcon(if (isVideo) R.drawable.ic_video_camera else R.drawable.call_img)
             .setLargeIcon(icon)
-            .setContentTitle("$title with $displayCaller")
-            .setContentText("Duration: $timeFmt")
+            .setContentTitle(displayName)
+            .setContentText("$title • $timeFmt")
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -360,10 +425,16 @@ class CallNotificationService : Service() {
     // ---------- Notification action handlers ----------
     private fun toggleMuteFromNotif() {
         try {
-            val call = CallHolder.activeCall ?: return
+            val call = CallStateManager.currentCall ?: return
 
             CallHolder.isMuted = !CallHolder.isMuted
             call.mute(CallHolder.isMuted)
+
+// 🔥 ALSO HANDLE VIDEO
+            CallStateManager.localAudioTrack?.enable(!CallHolder.isMuted)
+
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            am.isMicrophoneMute = CallHolder.isMuted
 
             updateOngoingNotification(currentCaller, currentIsVideo)
 
@@ -374,6 +445,15 @@ class CallNotificationService : Service() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "toggleMuteFromNotif error: ${e.message}")
+        }
+    }
+
+    private val stopReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+
+            Log.d(TAG, "STOP_CALL_NOTIFICATION received")
+
+            stopSelfAndCancel()
         }
     }
 
@@ -421,12 +501,16 @@ class CallNotificationService : Service() {
     }
 
     private fun endCallFromNotif() {
-        try {
-            CallHolder.callerDisplayName = currentCaller
 
-            CallHolder.activeCall?.disconnect()
-            CallHolder.activeCall = null
-            notifyBackendEndCall()
+        Log.d(TAG, "🔥 END FROM NOTIFICATION")
+
+        try {
+
+            // 🔥 END CALL EVERYWHERE
+            CallStateManager.endCall(applicationContext)
+
+
+
         } catch (e: Exception) {
             Log.e(TAG, "endCallFromNotif error: ${e.message}")
         } finally {
@@ -436,6 +520,22 @@ class CallNotificationService : Service() {
 
     // ---------- Handle Accept (from notification action) ----------
     private fun handleAccept() {
+        startForeground(
+            2002,
+            NotificationCompat.Builder(this, "call_notifications")
+                .setContentTitle("Connecting call")
+                .setContentText("Opening call screen...")
+                .setSmallIcon(R.drawable.call_img)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .build()
+        )
+        if (CallHolder.isOutgoing) {
+            Log.d(TAG, "Cross-call notification ignored")
+            stopSelfAndCancel()
+            return
+        }
+        if (actionHandled) return
+        actionHandled = true
         try {
             stopService(Intent(this, IncomingCallService::class.java))
         } catch (_: Exception) {}
@@ -470,77 +570,66 @@ class CallNotificationService : Service() {
 
 
 
-            if (currentIsVideo || videoRoom != null) {
+            if (currentIsVideo) {
 
-                Log.d(TAG, "Video call accepted from notification")
+                Log.d(TAG, "🎥 Accepting VIDEO call from notification")
 
-                val openIntent = Intent(this, IncomingCallActivity::class.java).apply {
+                // 🔥 STOP RING FIRST
+                try {
+                    stopService(Intent(this, IncomingCallService::class.java))
+                } catch (_: Exception) {}
+
+                try {
+                    val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    nm.cancel(INCOMING_CALL_NOTIFICATION_ID)
+                } catch (_: Exception) {}
+
+                // 🔥 IMPORTANT: UPDATE STATE MANAGER
+                CallStateManager.isVideoCall = true
+                CallStateManager.state = CallStateManager.State.VIDEO_CONNECTED
+                CallStateManager.caller = currentCaller
+                CallStateManager.videoRoom = videoRoom
+                CallStateManager.videoToken = videoToken
+
+                // 🔥 OPEN CALL SCREEN (THIS WILL HANDLE CONNECT)
+                val intent = Intent(this, CallScreenActivity::class.java).apply {
                     addFlags(
                         Intent.FLAG_ACTIVITY_NEW_TASK or
-                                Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                                Intent.FLAG_ACTIVITY_SINGLE_TOP
                     )
 
-                    putExtra("incoming_type", "VIDEO")
-                    putExtra("from", currentCaller)
-                    putExtra("room", videoRoom)
-                    putExtra("opened_from_notification", true)
+                    putExtra("call_mode", CallMode.APP_VIDEO.name)
+                    putExtra("display_name", currentCaller)
+                    putExtra("room_name", videoRoom)
+                    putExtra("access_token", videoToken)
+                    putExtra("start_timer_now", true)
                 }
-
-                startActivity(openIntent)
+                intent.putExtra("opened_from_notification", true)
+                startActivity(intent)
 
                 stopSelf()
                 return
             }
 
+// 2️⃣ THEN ACCEPT CALL
+            CallStateManager.acceptCall(applicationContext)
+
+// 2️⃣ Start ongoing notification (already correct)
+            CallNotificationService.startOngoing(
+                applicationContext,
+                currentCaller,
+                false
+            )
+
+// ❌ DO NOT OPEN ACTIVITY HERE
+
+            stopSelf()
 
 
-            // 3️⃣ Accept FIRST (critical)
-            invite.accept(this, object : Call.Listener {
 
-                override fun onConnected(call: Call) {
-                    CallHolder.isSpeakerOn = false
-                    CallHolder.isMuted = false
-
-                    val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                    am.mode = AudioManager.MODE_IN_COMMUNICATION
-                    am.isSpeakerphoneOn = false
-                    Log.d(TAG, "Call connected after ACCEPT")
-
-                    CallHolder.activeCall = call
-                    IncomingCallHolder.invite = null
-                    backupInvite = null
-
-                    // 1️⃣ Start ongoing foreground service
-                    startForegroundAndTimer(currentCaller, false)
-
-                    // 2️⃣ 🔥 ALWAYS launch CallScreenActivity
-                    val openIntent = Intent(this@CallNotificationService, CallScreenActivity::class.java).apply {
-                        addFlags(
-                            Intent.FLAG_ACTIVITY_NEW_TASK or
-                                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                                    Intent.FLAG_ACTIVITY_SINGLE_TOP
-                        )
-                        putExtra("call_mode", CallMode.PSTN_AUDIO.name)
-                        putExtra("display_name", currentCaller)
-                        putExtra("start_timer_now", true)
-                    }
-
-                    startActivity(openIntent)
-                }
-
-                override fun onConnectFailure(call: Call, e: CallException) {
-                    Log.e(TAG, "Accept failed: ${e.message}")
-                    stopSelfAndCancel()
-                }
-
-                override fun onDisconnected(call: Call, e: CallException?) {
-                    stopSelfAndCancel()
-                }
-
-                override fun onReconnecting(call: Call, e: CallException) {}
-                override fun onReconnected(call: Call) {}
-                override fun onRinging(call: Call) {}
-            })
+            stopSelf()
+            return
 
         } catch (e: Exception) {
             Log.e(TAG, "handleAccept error: ${e.message}")
@@ -550,7 +639,9 @@ class CallNotificationService : Service() {
 
     // ---------- Handle Reject (from notification action) ----------
     private fun handleReject() {
-        if (currentIsVideo || videoRoom != null) {
+        if (actionHandled) return
+        actionHandled = true
+        if (CallStateManager.isVideoCall){
 
             Log.d(TAG, "Video call rejected from notification")
 
@@ -640,10 +731,7 @@ class CallNotificationService : Service() {
                 ?: ""
 
             // 🔥 Get REAL remote identity from active call first
-            val remoteIdentityRaw =
-                CallHolder.activeCall?.from
-                    ?: CallHolder.callerDisplayName
-                    ?: ""
+            val remoteIdentityRaw = CallStateManager.caller ?: ""
 
             val toDigits = remoteIdentityRaw
                 .replace("client:", "")

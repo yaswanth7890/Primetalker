@@ -6,7 +6,7 @@ object CallHolder {
     @Volatile var activeCall: VoiceCall? = null
     var isOutgoing = false   // 🚀 new flag
     var callerDisplayName: String? = null
-
+    var callEnded = false
     var calleeAnswered = false
 
     var isMuted: Boolean = false

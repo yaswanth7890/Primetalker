@@ -39,7 +39,7 @@ class CallActivity : AppCompatActivity() {
     private lateinit var edtPhoneNumber: EditText
     private lateinit var spinnerCountryCode: Spinner
 
-
+    private var isCalling = false
     private lateinit var searchBar: EditText
     private lateinit var btnAudioCall: Button
     private lateinit var btnVideoCall: Button
@@ -136,17 +136,33 @@ class CallActivity : AppCompatActivity() {
 
         override fun onConnected(call: VoiceCall) {
             Log.d("CallActivity", "✅ Caller connected")
-            CallHolder.activeCall = call
+
+            CallStateManager.setOutgoing(call)
+
+            val serviceIntent = Intent(this@CallActivity, CallNotificationService::class.java).apply {
+                action = "START_ONGOING"
+                putExtra("caller", CallHolder.callerDisplayName ?: "Unknown")
+                putExtra("isVideo", false)
+            }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
         }
 
         override fun onDisconnected(call: VoiceCall, error: CallException?) {
+            isCalling = false
             Log.d("CallActivity", "📴 Caller disconnected: ${error?.message}")
-            CallHolder.activeCall = null
+            CallStateManager.endCall(this@CallActivity)
         }
 
         override fun onConnectFailure(call: VoiceCall, error: CallException) {
+            isCalling = false
+
             Log.e("CallActivity", "❌ Call failed: ${error.message}")
-            CallHolder.activeCall = null
+            CallStateManager.endCall(this@CallActivity)
             runOnUiThread {
                 Toast.makeText(this@CallActivity, "Call failed", Toast.LENGTH_SHORT).show()
             }
@@ -354,7 +370,7 @@ class CallActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-
+        loadCallHistory()
         // Only reload history if search bar is empty
         if (searchBar.text.toString().trim().isEmpty()) {
             loadCallHistory()
@@ -554,6 +570,18 @@ class CallActivity : AppCompatActivity() {
     }
 
     private fun startSmartVoiceCall(targetNumber: String) {
+
+        if (CallStateManager.state != CallStateManager.State.IDLE)  {
+            Toast.makeText(this,"Call already in progress",Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (isCalling) {
+            Log.d("CallActivity", "Call already in progress")
+            return
+        }
+
+        isCalling = true
+
         if (!hasAudioPermission()) {
             requestAudioPermission()
             return
@@ -566,6 +594,10 @@ class CallActivity : AppCompatActivity() {
 
         // 1️⃣ Get Voice token
         httpGet("$BACKEND_BASE_URL/voice-token?identity=$fromDigits") { ok, json, err ->
+            if (!ok) {
+                isCalling = false
+                return@httpGet
+            }
             if (!ok) return@httpGet
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -577,20 +609,6 @@ class CallActivity : AppCompatActivity() {
 
             val token = json.optString("token")
 
-            // 2️⃣ CONNECT CALLER VIA VOICE SDK
-            val options = ConnectOptions.Builder(token)
-                .params(
-                    mapOf(
-                        "To" to "+${PhoneUtils.normalizeIdentity(targetNumber)}"
-                    )
-                )
-                .build()
-
-            CallHolder.activeCall = Voice.connect(
-                this,
-                options,
-                voiceListener
-            )
 
             // 3️⃣ Ask backend to call callee
             httpPost(
@@ -599,24 +617,77 @@ class CallActivity : AppCompatActivity() {
                     put("fromIdentity", fromDigits)
                     put("toIdentity", targetNumber.replace("[^0-9]".toRegex(), ""))
                 }
-            ) { _, _, _ -> }
+            ) { ok, json, err ->
 
-            loadCallHistory()
-
-            // 4️⃣ NOW open UI
-            startActivity(
-                Intent(this, CallScreenActivity::class.java).apply {
-                    putExtra("call_mode", "PSTN_AUDIO")
-                    putExtra("display_name", targetNumber)
-                    putExtra("start_timer_now", false)
+                if (!ok) {
+                    isCalling = false
+                    return@httpPost
                 }
-            )
+
+                val status = json.optString("status")
+
+                if (status == "busy") {
+                    runOnUiThread {
+                        startActivity(
+                            Intent(this, CallScreenActivity::class.java).apply {
+                                putExtra("call_mode", "PSTN_AUDIO")
+                                putExtra("display_name", targetNumber)
+                                putExtra("show_busy", true)
+                            }
+                        )
+                    }
+                    isCalling = false
+                    return@httpPost
+                }
+
+                // Create Twilio call FIRST
+                val options = ConnectOptions.Builder(token)
+                    .params(mapOf("To" to "+${PhoneUtils.normalizeIdentity(targetNumber)}"))
+                    .build()
+
+                val call = Voice.connect(this, options, voiceListener)
+
+                CallStateManager.setOutgoing(call)
+
+                runOnUiThread {
+
+                    val serviceIntent = Intent(this, CallNotificationService::class.java).apply {
+                        action = "START_ONGOING"
+                        putExtra("caller", targetNumber)
+                        putExtra("isVideo", false)
+                    }
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(serviceIntent)
+                    } else {
+                        startService(serviceIntent)
+                    }
+
+                    CallHolder.callerDisplayName = targetNumber
+
+                    startActivity(
+                        Intent(this, CallScreenActivity::class.java).apply {
+                            putExtra("call_mode", "PSTN_AUDIO")
+                            putExtra("display_name", targetNumber)
+                            putExtra("start_timer_now", false)
+                        }
+                    )
+                }
+
+                isCalling = false
+            }
         }
     }
 
 
     // ---------- Outgoing App↔App video via Twilio Video ----------
     private fun startAppVideoCall(peerIdentity: String) {
+        if (isCalling) {
+            Log.d("CallActivity", "Call already in progress")
+            return
+        }
+
+        isCalling = true
         // ✅ Always prepend country code if missing
         val selectedCode = spinnerCountryCode.selectedItem.toString()
         val normalized = PhoneUtils.normalizeIdentity(peerIdentity)
@@ -685,6 +756,10 @@ class CallActivity : AppCompatActivity() {
 
         httpPost("$BACKEND_BASE_URL/video-invite", payload) { ok, json, err ->
             if (!ok) {
+                isCalling = false
+                return@httpPost
+            }
+            if (!ok) {
                 runOnUiThread {
                     Toast.makeText(this, "Video start error: $err", Toast.LENGTH_LONG).show()
                 }
@@ -707,7 +782,13 @@ class CallActivity : AppCompatActivity() {
                 putExtra("room_name", room)
                 putExtra("access_token", token)
             }
-            startActivity(i)
+            CallStateManager.startOutgoingVideo(
+                this,
+                room,
+                token,
+                normalized
+            )
+            isCalling = false
         }
 
         loadCallHistory()
